@@ -980,13 +980,59 @@ code { background: var(--ink-100); padding: 2px 6px; border-radius: var(--radius
 }
 
 /* ---------- Animated divider ---------- */
+/* ---------- Animated divider ---------- */
 .hero-header__divider {
-  position: relative;
+  position: relative;         /* NEW: needed so the bus can be positioned inside */
+  overflow: visible;          /* NEW: allow the bus to travel past the edges */
   display: flex;
   align-items: center;
   gap: 14px;
   margin: 2px 0 0;
 }
+
+.hero-header__divider-line {
+  flex: 1 1 auto;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(109, 95, 250, 0.65) 20%,
+    rgba(234, 88, 12, 0.65) 50%,
+    rgba(109, 95, 250, 0.65) 80%,
+    transparent 100%);
+  background-size: 200% 100%;
+  animation: divider-shimmer 4s linear infinite;
+}
+
+@keyframes divider-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.hero-header__divider-dot {
+  flex: 0 0 auto;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-500), var(--accent-500));
+  box-shadow: 0 0 0 5px rgba(109, 95, 250, 0.15);
+  animation: dot-pulse 2s var(--ease-standard) infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 5px rgba(109, 95, 250, 0.15); }
+  50%      { box-shadow: 0 0 0 10px rgba(109, 95, 250, 0.06); }
+}
+
+
+
+/* Accessibility: if the user prefers reduced motion, keep the bus hidden */
+@media (prefers-reduced-motion: reduce) {
+  .hero-header__divider-bus {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 .hero-header__divider-line {
   flex: 1 1 auto;
   height: 2px;
