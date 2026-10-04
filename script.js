@@ -2,38 +2,6 @@
    EKO TRANSITCARE — APPLICATION LOGIC
    "Know Your Ride Before You Leave."
    Powered by Ajigbeda Girls Digital Queens
-   -------------------------------------------------------------------------
-   ORGANISATION
-   01. CONFIGURATION
-   02. EXTERNAL LIBRARY LOADER
-   03. SUPABASE INITIALIZATION
-   04. APPLICATION STATE
-   05. UTILITIES
-   06. TOAST SYSTEM
-   07. MODAL SYSTEM
-   08. GLOBAL LOADER
-   09. FORM VALIDATION
-   10. AUTHENTICATION
-   11. SESSION & PROFILE
-   12. ROLE-BASED NAVIGATION
-   13. VIEW ROUTER
-   14. PASSENGER VIEWS
-   15. DRIVER VIEWS
-   16. OPERATOR VIEWS
-   17. ADMIN VIEWS
-   18. TERMINAL MANAGEMENT
-   19. ROUTE MANAGEMENT
-   20. VEHICLE MANAGEMENT
-   21. TRIP MANAGEMENT
-   22. GPS TRACKING
-   23. TICKETING
-   24. SEAT MANAGEMENT
-   25. WAITLIST
-   26. NOTIFICATIONS
-   27. FEEDBACK
-   28. AUDIT LOGS
-   29. ERROR HANDLING
-   30. BOOTSTRAP
    ========================================================================= */
 
 (function () {
@@ -54,6 +22,7 @@
     BOARDING_WINDOW_MINUTES: 10,
     WAITLIST_OFFER_MINUTES: 5,
     RESCHEDULE_CUTOFF_MINUTES: 15,
+    SIGNIN_TIMEOUT_MS: 10000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
@@ -61,9 +30,7 @@
 
   const IS_SUPABASE_CONFIGURED =
     !!TRANSITCARE_CONFIG.SUPABASE_URL &&
-    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY &&
-    !TRANSITCARE_CONFIG.SUPABASE_URL.includes("YOUR-PROJECT-REF") &&
-    !TRANSITCARE_CONFIG.SUPABASE_ANON_KEY.includes("YOUR-PUBLIC-ANON-KEY");
+    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY;
 
 
   /* =======================================================================
@@ -133,30 +100,19 @@
             autoRefreshToken: true,
             detectSessionInUrl: true,
 
-            /* -------------------------------------------------------------
-               Bulletproof lock override.
-
-               Supabase uses the browser's Web Locks API to coordinate
-               auth across tabs. On some mobile browsers and in-app
-               webviews, that lock never releases, so sign-in, session
-               checks and any auth-gated query hang forever.
-
-               Different versions of supabase-js pass the "acquire"
-               callback in different argument positions. This override
-               finds the callback wherever it is and calls it, so it
-               works with every version.
-               ------------------------------------------------------------- */
+            /* Defensive lock override: finds the callback wherever
+               Supabase puts it, calls it, and never leaves the promise
+               pending. Fixes hangs on mobile Safari and in-app webviews. */
             lock: function () {
-              var args = Array.prototype.slice.call(arguments);
-              var acquire = null;
-              for (var i = 0; i < args.length; i++) {
-                if (typeof args[i] === "function") {
-                  acquire = args[i];
-                  break;
+              try {
+                var args = Array.prototype.slice.call(arguments);
+                for (var i = 0; i < args.length; i++) {
+                  if (typeof args[i] === "function") {
+                    return Promise.resolve(args[i]());
+                  }
                 }
-              }
-              if (acquire) {
-                return acquire();
+              } catch (err) {
+                console.warn("[TransitCare] Lock acquire threw:", err);
               }
               return Promise.resolve(null);
             }
@@ -181,17 +137,10 @@
     role: null,
     currentView: "home",
     notifications: [],
-    channels: {
-      notifications: null,
-      tripLocations: null
-    },
+    channels: { notifications: null, tripLocations: null },
     gpsWatchId: null,
     activeTrip: null,
-    cache: {
-      terminals: null,
-      operators: null,
-      routes: null
-    }
+    cache: { terminals: null, operators: null, routes: null }
   };
 
   function resetState() {
@@ -213,18 +162,15 @@
   function escapeHtml(value) {
     if (value === null || value === undefined) return "";
     return String(value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function formatDateTime(iso) {
     if (!iso) return "—";
-    const date = new Date(iso);
-    if (isNaN(date.getTime())) return "—";
-    return date.toLocaleString("en-NG", {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleString("en-NG", {
       day: "2-digit", month: "short", year: "numeric",
       hour: "2-digit", minute: "2-digit"
     });
@@ -232,23 +178,23 @@
 
   function formatTime(iso) {
     if (!iso) return "—";
-    const date = new Date(iso);
-    if (isNaN(date.getTime())) return "—";
-    return date.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit" });
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit" });
   }
 
   function formatDate(iso) {
     if (!iso) return "—";
-    const date = new Date(iso);
-    if (isNaN(date.getTime())) return "—";
-    return date.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
   }
 
   function formatCurrency(amount) {
     if (amount === null || amount === undefined || amount === "") return "—";
-    const numeric = Number(amount);
-    if (isNaN(numeric)) return "—";
-    return "₦" + numeric.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const n = Number(amount);
+    if (isNaN(n)) return "—";
+    return "₦" + n.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   }
 
   function formatRelativeTime(iso) {
@@ -256,15 +202,15 @@
     const then = new Date(iso).getTime();
     if (isNaN(then)) return "—";
     const diff = Date.now() - then;
-    const seconds = Math.floor(diff / 1000);
-    if (seconds < 10) return "just now";
-    if (seconds < 60) return seconds + " seconds ago";
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return minutes + (minutes === 1 ? " minute ago" : " minutes ago");
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return hours + (hours === 1 ? " hour ago" : " hours ago");
-    const days = Math.floor(hours / 24);
-    if (days < 30) return days + (days === 1 ? " day ago" : " days ago");
+    const s = Math.floor(diff / 1000);
+    if (s < 10) return "just now";
+    if (s < 60) return s + " seconds ago";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + (m === 1 ? " minute ago" : " minutes ago");
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+    const d = Math.floor(h / 24);
+    if (d < 30) return d + (d === 1 ? " day ago" : " days ago");
     return formatDate(iso);
   }
 
@@ -287,17 +233,26 @@
   }
 
   function generateTripCode() {
-    const random = Math.floor(100 + Math.random() * 900);
-    return "TC-" + random;
+    return "TC-" + Math.floor(100 + Math.random() * 900);
   }
 
   function generateTicketCode() {
     const stamp = Date.now().toString(36).toUpperCase();
-    const random = Math.random().toString(36).slice(2, 6).toUpperCase();
-    return "TKT-" + stamp + "-" + random;
+    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+    return "TKT-" + stamp + "-" + rand;
   }
 
   function nowIso() { return new Date().toISOString(); }
+
+  function clearSupabaseStorage() {
+    try {
+      Object.keys(localStorage).forEach(function (key) {
+        if (key.indexOf("sb-") === 0 || key.indexOf("supabase") === 0) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) { /* ignore */ }
+  }
 
 
   /* =======================================================================
@@ -479,9 +434,7 @@
     if (!container) return;
     container.innerHTML =
       '<div class="empty-state">' +
-        '<span class="empty-state__icon" aria-hidden="true">' +
-          escapeHtml(options.icon || "📭") +
-        '</span>' +
+        '<span class="empty-state__icon" aria-hidden="true">' + escapeHtml(options.icon || "📭") + '</span>' +
         '<p class="empty-state__title">' + escapeHtml(options.title || "Nothing here yet") + '</p>' +
         '<p class="empty-state__message">' + escapeHtml(options.message || "") + '</p>' +
         (options.actionHtml ? '<div class="empty-state__actions">' + options.actionHtml + '</div>' : "") +
@@ -646,9 +599,24 @@
 
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-      return data;
+
+      /* Race the sign-in against a timeout so a stuck Web Lock can
+         never leave the user staring at "Signing in…" forever. */
+      const signInPromise = supabase.auth.signInWithPassword({ email, password })
+        .then(function (result) {
+          if (result.error) throw result.error;
+          return result.data;
+        });
+
+      const timeoutPromise = new Promise(function (_, reject) {
+        setTimeout(function () {
+          const err = new Error("Sign-in is taking too long.");
+          err.code = "SIGNIN_TIMEOUT";
+          reject(err);
+        }, TRANSITCARE_CONFIG.SIGNIN_TIMEOUT_MS);
+      });
+
+      return Promise.race([signInPromise, timeoutPromise]);
     },
 
     async resendVerification(email) {
@@ -676,9 +644,23 @@
     },
 
     async signOut() {
+      /* Close realtime first so the old token is not kept alive. */
+      stopAllRealtime();
+
       if (supabase) {
-        try { await supabase.auth.signOut(); } catch (err) { console.warn(err); }
+        try {
+          await Promise.race([
+            supabase.auth.signOut(),
+            new Promise(function (resolve) { setTimeout(resolve, 3000); })
+          ]);
+        } catch (err) {
+          console.warn("[TransitCare] Sign-out error (ignored):", err);
+        }
       }
+
+      /* Belt and braces: clear any leftover sb- keys. */
+      clearSupabaseStorage();
+
       resetState();
       showAuthScreen();
     },
@@ -918,7 +900,7 @@
 
 
   /* =======================================================================
-     SHARED DATA ACCESS HELPERS
+     SHARED DATA HELPERS
      ======================================================================= */
   const Data = {
 
@@ -1008,26 +990,18 @@
         '<section class="card">' +
           '<div class="card__body">' +
             '<p class="eyebrow">Eko TransitCare</p>' +
-            '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">' +
-              'Hello, ' + escapeHtml(firstName) + ' 👋' +
-            '</h2>' +
-            '<p class="text-muted mt-2">' +
-              'Find a bus, reserve a seat and track your ride — all before you leave home.' +
-            '</p>' +
+            '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
+            '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
             '<div class="button-group mt-4">' +
               '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
               '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
             '</div>' +
           '</div>' +
         '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
-          '<div class="card__body" id="home-upcoming"></div>' +
-        '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
-          '<div class="card__body card__body--flush" id="home-notifications"></div>' +
-        '</section>';
+        '<section class="card"><div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
+        '<div class="card__body" id="home-upcoming"></div></section>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
+        '<div class="card__body card__body--flush" id="home-notifications"></div></section>';
 
       document.querySelectorAll("[data-nav-link]").forEach(function (el) {
         el.addEventListener("click", function (event) {
@@ -1050,8 +1024,7 @@
         if (error) throw error;
         if (!data || data.length === 0) {
           renderEmpty(upcoming, {
-            icon: "🧭",
-            title: "No upcoming trips yet",
+            icon: "🧭", title: "No upcoming trips yet",
             message: "Search for a bus and reserve your seat — your trips will appear here."
           });
         } else {
@@ -1063,18 +1036,13 @@
       try {
         renderLoading(notif, "Loading notifications…");
         const { data, error } = await supabase
-          .from("notifications")
-          .select("*")
+          .from("notifications").select("*")
           .eq("recipient_id", AppState.authUser.id)
           .order("created_at", { ascending: false })
           .limit(4);
         if (error) throw error;
         if (!data || data.length === 0) {
-          renderEmpty(notif, {
-            icon: "🔔",
-            title: "No notifications yet",
-            message: "Trip reminders and ticket updates will appear here."
-          });
+          renderEmpty(notif, { icon: "🔔", title: "No notifications yet", message: "Trip reminders and ticket updates will appear here." });
         } else {
           notif.innerHTML = data.map(renderNotificationRow).join("");
         }
@@ -1087,23 +1055,13 @@
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
     return (
-      '<div class="list__item">' +
-        '<div class="list__main">' +
-          '<p class="list__title">' +
-            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") +
-          '</p>' +
-          '<p class="list__meta">' +
-            escapeHtml(trip.trip_code || "—") + ' · ' +
-            escapeHtml(vehicle.registration_number || "—") + ' · ' +
-            'Seat ' + escapeHtml(booking.seat_number || "—") +
-          '</p>' +
-        '</div>' +
-        '<div class="list__actions">' +
-          '<span class="badge badge--' + escapeHtml(booking.status || "reserved") + '">' +
-            escapeHtml(humanizeStatus(booking.status)) +
-          '</span>' +
-        '</div>' +
-      '</div>'
+      '<div class="list__item"><div class="list__main">' +
+        '<p class="list__title">' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+        '<p class="list__meta">' + escapeHtml(trip.trip_code || "—") + ' · ' +
+          escapeHtml(vehicle.registration_number || "—") + ' · Seat ' + escapeHtml(booking.seat_number || "—") + '</p>' +
+      '</div>' +
+      '<span class="badge badge--' + escapeHtml(booking.status || "reserved") + '">' +
+        escapeHtml(humanizeStatus(booking.status)) + '</span></div>'
     );
   }
 
@@ -1130,27 +1088,19 @@
           '<h2 class="search-panel__title">Where are you going?</h2>' +
           '<p class="search-panel__subtitle">Search real trips from participating operators.</p>' +
           '<form class="search-panel__form" id="search-form">' +
-            '<div class="search-panel__field">' +
-              '<label for="search-origin">From</label>' +
-              '<select id="search-origin"><option value="">Loading…</option></select>' +
-            '</div>' +
-            '<div class="search-panel__field">' +
-              '<label for="search-destination">To</label>' +
-              '<select id="search-destination"><option value="">Loading…</option></select>' +
-            '</div>' +
-            '<div class="search-panel__field">' +
-              '<label for="search-date">Date</label>' +
-              '<input type="date" id="search-date" />' +
-            '</div>' +
+            '<div class="search-panel__field"><label for="search-origin">From</label>' +
+              '<select id="search-origin"><option value="">Loading…</option></select></div>' +
+            '<div class="search-panel__field"><label for="search-destination">To</label>' +
+              '<select id="search-destination"><option value="">Loading…</option></select></div>' +
+            '<div class="search-panel__field"><label for="search-date">Date</label>' +
+              '<input type="date" id="search-date" /></div>' +
             '<div class="search-panel__actions">' +
               '<button type="submit" class="button button--primary button--block" id="search-submit">Search</button>' +
             '</div>' +
           '</form>' +
         '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Available buses</h3></div>' +
-          '<div class="card__body" id="search-results"></div>' +
-        '</section>';
+        '<section class="card"><div class="card__header"><h3 class="card__title">Available buses</h3></div>' +
+        '<div class="card__body" id="search-results"></div></section>';
 
       const originSelect = document.getElementById("search-origin");
       const destSelect = document.getElementById("search-destination");
@@ -1215,8 +1165,7 @@
 
           if (enriched.length === 0) {
             renderEmpty(resultsEl, {
-              icon: "🚌",
-              title: "No buses found",
+              icon: "🚌", title: "No buses found",
               message: "No buses are currently available for this route. Try a different date or destination."
             });
             return;
@@ -1259,22 +1208,16 @@
           '<p class="trip-card__vehicle">' + escapeHtml(vehicle.registration_number || "Vehicle TBA") + '</p>' +
         '</div>' +
         '<div class="trip-card__route">' +
-          '<p class="trip-card__cities">' +
-            escapeHtml(route.origin || "?") +
-            '<span class="trip-card__arrow" aria-hidden="true">→</span>' +
-            escapeHtml(route.destination || "?") +
-          '</p>' +
-          '<p class="trip-card__stops">' +
-            escapeHtml(route.estimated_minutes ? route.estimated_minutes + " min journey" : "") +
-          '</p>' +
+          '<p class="trip-card__cities">' + escapeHtml(route.origin || "?") +
+            '<span class="trip-card__arrow" aria-hidden="true">→</span>' + escapeHtml(route.destination || "?") + '</p>' +
+          '<p class="trip-card__stops">' + escapeHtml(route.estimated_minutes ? route.estimated_minutes + " min journey" : "") + '</p>' +
         '</div>' +
         '<div class="trip-card__timing">' +
           '<p class="trip-card__time">' + escapeHtml(formatTime(trip.planned_departure)) + '</p>' +
           '<p class="trip-card__date">' + escapeHtml(formatDate(trip.planned_departure)) + '</p>' +
         '</div>' +
         '<div class="trip-card__seats">' +
-          '<p class="trip-card__seats-value' + (seatsLow ? " trip-card__seats-value--low" : "") + '">' +
-            stats.available + '</p>' +
+          '<p class="trip-card__seats-value' + (seatsLow ? " trip-card__seats-value--low" : "") + '">' + stats.available + '</p>' +
           '<p class="trip-card__seats-label">seats free</p>' +
         '</div>' +
         '<div class="trip-card__fare">' +
@@ -1283,9 +1226,7 @@
         '</div>' +
         '<div class="trip-card__actions">' +
           '<span class="badge badge--' + escapeHtml(status) + '">' + escapeHtml(humanizeStatus(status)) + '</span>' +
-          (isTrackable
-            ? '<button type="button" class="button button--small button--ghost" data-track-trip="' + escapeHtml(trip.id) + '">Track</button>'
-            : "") +
+          (isTrackable ? '<button type="button" class="button button--small button--ghost" data-track-trip="' + escapeHtml(trip.id) + '">Track</button>' : "") +
           (stats.available > 0 && (status === "scheduled" || status === "boarding")
             ? '<button type="button" class="button button--small button--primary" data-book-trip="' + escapeHtml(trip.id) + '">Book</button>'
             : '<span class="badge badge--cancelled">Full</span>') +
@@ -1318,10 +1259,8 @@
       }
 
       const { data: existing } = await supabase
-        .from("bookings")
-        .select("seat_number, status")
-        .eq("trip_id", trip.id)
-        .in("status", ["reserved", "boarded"]);
+        .from("bookings").select("seat_number, status")
+        .eq("trip_id", trip.id).in("status", ["reserved", "boarded"]);
 
       const takenSeats = {};
       (existing || []).forEach(function (b) { takenSeats[b.seat_number] = b.status; });
@@ -1334,24 +1273,20 @@
 
       for (let i = 1; i <= capacity; i++) {
         const status = takenSeats[i];
-        let cls = "seat--available";
-        let stateLabel = "Free";
+        let cls = "seat--available", stateLabel = "Free";
         if (status === "reserved") { cls = "seat--reserved"; stateLabel = "Reserved"; }
         if (status === "boarded") { cls = "seat--boarded"; stateLabel = "Boarded"; }
-        seatsHtml +=
-          '<button type="button" class="seat ' + cls + '" data-seat="' + i + '" ' +
-            (status ? "disabled" : "") + '>' +
-            '<span class="seat__number">' + i + '</span>' +
-            '<span class="seat__state">' + stateLabel + '</span>' +
-          '</button>';
+        seatsHtml += '<button type="button" class="seat ' + cls + '" data-seat="' + i + '"' +
+          (status ? " disabled" : "") + '>' +
+          '<span class="seat__number">' + i + '</span>' +
+          '<span class="seat__state">' + stateLabel + '</span></button>';
       }
       seatsHtml += '</div>';
 
       body.innerHTML =
-        '<p class="text-muted mb-4">' +
-          escapeHtml(trip.trip_code || "Trip") + ' · ' +
-          escapeHtml(trip.routes ? trip.routes.origin + " → " + trip.routes.destination : "") +
-        '</p>' + seatsHtml +
+        '<p class="text-muted mb-4">' + escapeHtml(trip.trip_code || "Trip") + ' · ' +
+          escapeHtml(trip.routes ? trip.routes.origin + " → " + trip.routes.destination : "") + '</p>' +
+        seatsHtml +
         '<p class="text-small text-muted mt-4" id="selected-seat-label">No seat selected.</p>';
 
       let selectedSeat = null;
@@ -1380,12 +1315,9 @@
     Loader.show("Processing booking…");
     try {
       const { data: conflict } = await supabase
-        .from("bookings")
-        .select("id")
-        .eq("trip_id", trip.id)
-        .eq("seat_number", seat)
-        .in("status", ["reserved", "boarded"])
-        .maybeSingle();
+        .from("bookings").select("id")
+        .eq("trip_id", trip.id).eq("seat_number", seat)
+        .in("status", ["reserved", "boarded"]).maybeSingle();
 
       if (conflict) {
         Modal.close();
@@ -1394,16 +1326,13 @@
       }
 
       const { data: booking, error: bookingError } = await supabase
-        .from("bookings")
-        .insert({
+        .from("bookings").insert({
           passenger_id: AppState.authUser.id,
           trip_id: trip.id,
           seat_number: seat,
           status: "reserved",
           fare: trip.routes ? trip.routes.base_fare : null
-        })
-        .select()
-        .single();
+        }).select().single();
       if (bookingError) throw bookingError;
 
       const { error: ticketError } = await supabase.from("tickets").insert({
@@ -1441,8 +1370,7 @@
       renderLoading(list, "Loading your trips…");
 
       try {
-        const { data, error } = await supabase
-          .from("bookings")
+        const { data, error } = await supabase.from("bookings")
           .select("*, trips(*, routes(origin, destination), vehicles(registration_number))")
           .eq("passenger_id", AppState.authUser.id)
           .order("created_at", { ascending: false });
@@ -1450,16 +1378,14 @@
 
         if (!data || data.length === 0) {
           renderEmpty(list, {
-            icon: "🧭",
-            title: "No trips yet",
+            icon: "🧭", title: "No trips yet",
             message: "Once you book a bus, your journeys will show up here."
           });
           return;
         }
 
-        list.innerHTML = '<div class="card"><div class="card__body card__body--flush">' +
-          '<div class="list">' + data.map(renderBookingRow).join("") + '</div>' +
-          '</div></div>';
+        list.innerHTML = '<div class="card"><div class="card__body card__body--flush"><div class="list">' +
+          data.map(renderBookingRow).join("") + '</div></div></div>';
       } catch (err) { renderError(list, err.message); }
     }
   });
@@ -1473,19 +1399,14 @@
       renderLoading(list, "Loading your tickets…");
 
       try {
-        const { data, error } = await supabase
-          .from("bookings")
+        const { data, error } = await supabase.from("bookings")
           .select("*, trips(*, routes(origin, destination), vehicles(registration_number)), tickets(*)")
           .eq("passenger_id", AppState.authUser.id)
           .order("created_at", { ascending: false });
         if (error) throw error;
 
         if (!data || data.length === 0) {
-          renderEmpty(list, {
-            icon: "🎫",
-            title: "No tickets yet",
-            message: "Book a trip to receive a digital ticket with a QR code."
-          });
+          renderEmpty(list, { icon: "🎫", title: "No tickets yet", message: "Book a trip to receive a digital ticket with a QR code." });
           return;
         }
 
@@ -1512,9 +1433,7 @@
           '<span class="ticket-card__status">' + escapeHtml(humanizeStatus(booking.status)) + '</span>' +
         '</header>' +
         '<div class="ticket-card__body">' +
-          '<p class="ticket-card__route">' +
-            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") +
-          '</p>' +
+          '<p class="ticket-card__route">' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
           '<dl class="ticket-card__details">' +
             '<div class="ticket-card__detail"><dt>Ticket ID</dt><dd>' + escapeHtml(ticket ? ticket.ticket_code : "—") + '</dd></div>' +
             '<div class="ticket-card__detail"><dt>Trip</dt><dd>' + escapeHtml(trip.trip_code || "—") + '</dd></div>' +
@@ -1574,11 +1493,9 @@
         '</section>';
 
       try {
-        const { data: trip, error } = await supabase
-          .from("trips")
+        const { data: trip, error } = await supabase.from("trips")
           .select("*, routes(*), vehicles(*), profiles!trips_driver_id_fkey(full_name)")
-          .eq("id", tripId)
-          .maybeSingle();
+          .eq("id", tripId).maybeSingle();
         if (error) throw error;
         if (!trip) {
           renderEmpty(container, { icon: "🚌", title: "Trip not found", message: "This trip may have been removed." });
@@ -1592,13 +1509,12 @@
         statusEl.textContent = humanizeStatus(trip.status);
 
         const detailsEl = document.getElementById("track-details");
-        detailsEl.innerHTML =
-          '<dl class="detail-list">' +
-            '<div><dt>Driver</dt><dd>' + escapeHtml(trip.profiles ? trip.profiles.full_name : "—") + '</dd></div>' +
-            '<div><dt>Vehicle</dt><dd>' + escapeHtml(trip.vehicles ? trip.vehicles.registration_number : "—") + '</dd></div>' +
-            '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
-            '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
-          '</dl>';
+        detailsEl.innerHTML = '<dl class="detail-list">' +
+          '<div><dt>Driver</dt><dd>' + escapeHtml(trip.profiles ? trip.profiles.full_name : "—") + '</dd></div>' +
+          '<div><dt>Vehicle</dt><dd>' + escapeHtml(trip.vehicles ? trip.vehicles.registration_number : "—") + '</dd></div>' +
+          '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
+          '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
+        '</dl>';
 
         await initTrackingMap(trip);
         subscribeToTripLocations(trip.id);
@@ -1627,26 +1543,19 @@
       trackMapInstance = window.L.map(mapEl).setView([center.lat, center.lng], TRANSITCARE_CONFIG.DEFAULT_MAP_ZOOM);
 
       window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "© OpenStreetMap contributors",
-        maxZoom: 19
+        attribution: "© OpenStreetMap contributors", maxZoom: 19
       }).addTo(trackMapInstance);
 
-      const { data: locations } = await supabase
-        .from("trip_locations")
-        .select("*")
-        .eq("trip_id", trip.id)
-        .order("recorded_at", { ascending: false })
-        .limit(1);
+      const { data: locations } = await supabase.from("trip_locations").select("*")
+        .eq("trip_id", trip.id).order("recorded_at", { ascending: false }).limit(1);
 
       if (locations && locations.length > 0) {
         const loc = locations[0];
         updateTrackMarker(loc.latitude, loc.longitude, loc.recorded_at);
       } else {
-        mapEl.insertAdjacentHTML(
-          "beforeend",
+        mapEl.insertAdjacentHTML("beforeend",
           '<div class="map-overlay"><span class="map-overlay__label">Awaiting GPS signal</span>' +
-          '<span class="map-overlay__value">The driver has not started sharing location yet.</span></div>'
-        );
+          '<span class="map-overlay__value">The driver has not started sharing location yet.</span></div>');
       }
     } catch (err) {
       mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable. ' + escapeHtml(err.message) + '</div>';
@@ -1669,11 +1578,9 @@
       const stale = age > TRANSITCARE_CONFIG.GPS_STALE_THRESHOLD_MS;
       const ageText = formatRelativeTime(recordedAt);
 
-      const overlayHtml =
-        '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
-          '<span class="map-overlay__label">' + (stale ? "GPS signal may be unavailable" : "Live location") + '</span>' +
-          '<span class="map-overlay__value">Last updated ' + escapeHtml(ageText) + '</span>' +
-        '</div>';
+      const overlayHtml = '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
+        '<span class="map-overlay__label">' + (stale ? "GPS signal may be unavailable" : "Live location") + '</span>' +
+        '<span class="map-overlay__value">Last updated ' + escapeHtml(ageText) + '</span></div>';
 
       if (overlay) overlay.outerHTML = overlayHtml;
       else mapEl.insertAdjacentHTML("beforeend", overlayHtml);
@@ -1683,7 +1590,6 @@
   function subscribeToTripLocations(tripId) {
     if (!supabase) return;
     stopRealtimeChannel("tripLocations");
-
     AppState.channels.tripLocations = supabase
       .channel("trip-locations-" + tripId)
       .on("postgres_changes", {
@@ -1722,8 +1628,7 @@
         const notifications = await Notifications.fetch();
         if (!notifications || notifications.length === 0) {
           renderEmpty(list, {
-            icon: "🔔",
-            title: "No notifications yet",
+            icon: "🔔", title: "No notifications yet",
             message: "You will be notified when a bus is available, your ticket is confirmed, or a seat is released."
           });
           return;
@@ -1766,25 +1671,19 @@
             '</div>' +
           '</div>' +
         '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Account details</h3></div>' +
-          '<div class="card__body">' +
-            '<form id="profile-form">' +
-              '<div class="field"><label for="profile-name">Full name</label>' +
-                '<input type="text" id="profile-name" value="' + escapeHtml(profile.full_name || "") + '" /></div>' +
-              '<div class="field"><label for="profile-phone">Phone number</label>' +
-                '<input type="tel" id="profile-phone" value="' + escapeHtml(profile.phone || "") + '" /></div>' +
-              '<div class="field"><label for="profile-email">Email address</label>' +
-                '<input type="email" id="profile-email" value="' + escapeHtml(profile.email || "") + '" disabled />' +
-                '<p class="field__hint">Email changes require verification.</p></div>' +
-              '<div class="form-actions"><button type="submit" class="button button--primary">Save changes</button></div>' +
-            '</form>' +
-          '</div>' +
-        '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Session</h3></div>' +
-          '<div class="card__body"><button type="button" class="button button--danger" id="profile-signout">Sign out</button></div>' +
-        '</section>';
+        '<section class="card"><div class="card__header"><h3 class="card__title">Account details</h3></div>' +
+        '<div class="card__body"><form id="profile-form">' +
+          '<div class="field"><label for="profile-name">Full name</label>' +
+            '<input type="text" id="profile-name" value="' + escapeHtml(profile.full_name || "") + '" /></div>' +
+          '<div class="field"><label for="profile-phone">Phone number</label>' +
+            '<input type="tel" id="profile-phone" value="' + escapeHtml(profile.phone || "") + '" /></div>' +
+          '<div class="field"><label for="profile-email">Email address</label>' +
+            '<input type="email" id="profile-email" value="' + escapeHtml(profile.email || "") + '" disabled />' +
+            '<p class="field__hint">Email changes require verification.</p></div>' +
+          '<div class="form-actions"><button type="submit" class="button button--primary">Save changes</button></div>' +
+        '</form></div></section>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Session</h3></div>' +
+        '<div class="card__body"><button type="button" class="button button--danger" id="profile-signout">Sign out</button></div></section>';
 
       document.getElementById("profile-form").addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -1827,14 +1726,10 @@
             '</div>'
           : "") +
         '<section class="stat-grid" id="driver-stats"></section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Assigned vehicle</h3></div>' +
-          '<div class="card__body" id="driver-vehicle">Loading…</div>' +
-        '</section>' +
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Your recent trips</h3></div>' +
-          '<div class="card__body card__body--flush" id="driver-recent-trips">Loading…</div>' +
-        '</section>';
+        '<section class="card"><div class="card__header"><h3 class="card__title">Assigned vehicle</h3></div>' +
+        '<div class="card__body" id="driver-vehicle">Loading…</div></section>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Your recent trips</h3></div>' +
+        '<div class="card__body card__body--flush" id="driver-recent-trips">Loading…</div></section>';
 
       try {
         const { data: trips } = await supabase.from("trips").select("status").eq("driver_id", AppState.authUser.id);
@@ -1854,25 +1749,22 @@
           vehicleEl.innerHTML = '<p class="text-muted">No vehicle assigned yet. Please contact an administrator.</p>';
         } else {
           const v = vehicles[0];
-          vehicleEl.innerHTML =
-            '<dl class="detail-list">' +
-              '<div><dt>Registration</dt><dd>' + escapeHtml(v.registration_number || "—") + '</dd></div>' +
-              '<div><dt>Type</dt><dd>' + escapeHtml(v.vehicle_type || "—") + '</dd></div>' +
-              '<div><dt>Capacity</dt><dd>' + escapeHtml(v.capacity || "—") + ' seats</dd></div>' +
-              '<div><dt>Status</dt><dd><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
-                escapeHtml(humanizeStatus(v.status || "active")) + '</span></dd></div>' +
-            '</dl>';
+          vehicleEl.innerHTML = '<dl class="detail-list">' +
+            '<div><dt>Registration</dt><dd>' + escapeHtml(v.registration_number || "—") + '</dd></div>' +
+            '<div><dt>Type</dt><dd>' + escapeHtml(v.vehicle_type || "—") + '</dd></div>' +
+            '<div><dt>Capacity</dt><dd>' + escapeHtml(v.capacity || "—") + ' seats</dd></div>' +
+            '<div><dt>Status</dt><dd><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
+              escapeHtml(humanizeStatus(v.status || "active")) + '</span></dd></div>' +
+          '</dl>';
         }
       } catch (err) { vehicleEl.innerHTML = '<p class="text-muted">Unable to load vehicle.</p>'; }
 
       const tripsEl = document.getElementById("driver-recent-trips");
       try {
-        const { data: trips } = await supabase
-          .from("trips")
+        const { data: trips } = await supabase.from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
           .eq("driver_id", AppState.authUser.id)
-          .order("created_at", { ascending: false })
-          .limit(5);
+          .order("created_at", { ascending: false }).limit(5);
         if (!trips || trips.length === 0) {
           renderEmpty(tripsEl, { icon: "🧭", title: "No trips yet", message: "Create your first trip from Make Bus Available." });
         } else {
@@ -1883,30 +1775,22 @@
   });
 
   function statCard(icon, value, label, variant) {
-    return (
-      '<article class="stat-card">' +
-        '<span class="stat-card__icon stat-card__icon--' + (variant || "") + '" aria-hidden="true">' + icon + '</span>' +
-        '<div class="stat-card__body">' +
-          '<p class="stat-card__value">' + escapeHtml(value) + '</p>' +
-          '<p class="stat-card__label">' + escapeHtml(label) + '</p>' +
-        '</div>' +
-      '</article>'
-    );
+    return '<article class="stat-card">' +
+      '<span class="stat-card__icon stat-card__icon--' + (variant || "") + '" aria-hidden="true">' + icon + '</span>' +
+      '<div class="stat-card__body">' +
+        '<p class="stat-card__value">' + escapeHtml(value) + '</p>' +
+        '<p class="stat-card__label">' + escapeHtml(label) + '</p>' +
+      '</div></article>';
   }
 
   function renderDriverTripRow(trip) {
     const route = trip.routes || {};
-    return (
-      '<div class="list__item">' +
-        '<div class="list__main">' +
-          '<p class="list__title">' + escapeHtml(trip.trip_code || "—") + ' · ' +
-            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
-          '<p class="list__meta">' + escapeHtml(formatDateTime(trip.planned_departure)) + '</p>' +
-        '</div>' +
-        '<span class="badge badge--' + escapeHtml(trip.status || "scheduled") + '">' +
-          escapeHtml(humanizeStatus(trip.status)) + '</span>' +
-      '</div>'
-    );
+    return '<div class="list__item"><div class="list__main">' +
+      '<p class="list__title">' + escapeHtml(trip.trip_code || "—") + ' · ' +
+        escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+      '<p class="list__meta">' + escapeHtml(formatDateTime(trip.planned_departure)) + '</p></div>' +
+      '<span class="badge badge--' + escapeHtml(trip.status || "scheduled") + '">' +
+        escapeHtml(humanizeStatus(trip.status)) + '</span></div>';
   }
 
   Router.register("make-bus-available", {
@@ -1919,24 +1803,20 @@
       }
 
       container.innerHTML =
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Trip details</h3></div>' +
-          '<div class="card__body">' +
-            '<form id="trip-form">' +
-              '<div class="form-grid">' +
-                '<div class="field"><label for="trip-vehicle">Vehicle</label>' +
-                  '<select id="trip-vehicle" required><option value="">Loading…</option></select></div>' +
-                '<div class="field"><label for="trip-route">Route</label>' +
-                  '<select id="trip-route" required><option value="">Loading…</option></select></div>' +
-                '<div class="field"><label for="trip-terminal">Terminal</label>' +
-                  '<select id="trip-terminal"><option value="">Loading…</option></select></div>' +
-                '<div class="field"><label for="trip-departure">Planned departure</label>' +
-                  '<input type="datetime-local" id="trip-departure" required /></div>' +
-              '</div>' +
-              '<div class="form-actions"><button type="submit" class="button button--primary">Make bus available</button></div>' +
-            '</form>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Trip details</h3></div>' +
+        '<div class="card__body"><form id="trip-form">' +
+          '<div class="form-grid">' +
+            '<div class="field"><label for="trip-vehicle">Vehicle</label>' +
+              '<select id="trip-vehicle" required><option value="">Loading…</option></select></div>' +
+            '<div class="field"><label for="trip-route">Route</label>' +
+              '<select id="trip-route" required><option value="">Loading…</option></select></div>' +
+            '<div class="field"><label for="trip-terminal">Terminal</label>' +
+              '<select id="trip-terminal"><option value="">Loading…</option></select></div>' +
+            '<div class="field"><label for="trip-departure">Planned departure</label>' +
+              '<input type="datetime-local" id="trip-departure" required /></div>' +
           '</div>' +
-        '</section>';
+          '<div class="form-actions"><button type="submit" class="button button--primary">Make bus available</button></div>' +
+        '</form></div></section>';
 
       const vehicleSelect = document.getElementById("trip-vehicle");
       const routeSelect = document.getElementById("trip-route");
@@ -1944,9 +1824,7 @@
 
       try {
         const [vehicles, routes, terminals] = await Promise.all([
-          Data.getVehicles(),
-          Data.getRoutes(true),
-          Data.getTerminals(true)
+          Data.getVehicles(), Data.getRoutes(true), Data.getTerminals(true)
         ]);
 
         const myVehicles = vehicles.filter(function (v) { return v.assigned_driver_id === AppState.authUser.id; });
@@ -2014,13 +1892,11 @@
       renderLoading(root, "Loading active trip…");
 
       try {
-        const { data: trips, error } = await supabase
-          .from("trips")
+        const { data: trips, error } = await supabase.from("trips")
           .select("*, routes(*), vehicles(*), terminals(name)")
           .eq("driver_id", AppState.authUser.id)
           .in("status", ["scheduled", "boarding", "in_transit"])
-          .order("planned_departure", { ascending: true })
-          .limit(1);
+          .order("planned_departure", { ascending: true }).limit(1);
         if (error) throw error;
 
         if (!trips || trips.length === 0) {
@@ -2046,21 +1922,18 @@
           '<h3 class="card__title">' + escapeHtml(trip.trip_code || "Trip") + '</h3>' +
           '<span class="badge badge--' + escapeHtml(trip.status) + '">' + escapeHtml(humanizeStatus(trip.status)) + '</span>' +
         '</div>' +
-        '<div class="card__body">' +
-          '<dl class="detail-list">' +
-            '<div><dt>Route</dt><dd>' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</dd></div>' +
-            '<div><dt>Vehicle</dt><dd>' + escapeHtml(vehicle.registration_number || "—") + '</dd></div>' +
-            '<div><dt>Terminal</dt><dd>' + escapeHtml(terminal.name || "—") + '</dd></div>' +
-            '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
-            '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
-          '</dl>' +
-        '</div>' +
+        '<div class="card__body"><dl class="detail-list">' +
+          '<div><dt>Route</dt><dd>' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</dd></div>' +
+          '<div><dt>Vehicle</dt><dd>' + escapeHtml(vehicle.registration_number || "—") + '</dd></div>' +
+          '<div><dt>Terminal</dt><dd>' + escapeHtml(terminal.name || "—") + '</dd></div>' +
+          '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
+          '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
+        '</dl></div>' +
         '<div class="card__footer"><div class="button-group" id="trip-actions"></div></div>' +
       '</section>' +
       '<section class="card" id="gps-card" style="display:none;">' +
         '<div class="card__header"><h3 class="card__title">GPS tracking</h3>' +
-          '<span class="badge badge--in_transit" id="gps-status">Starting…</span>' +
-        '</div>' +
+          '<span class="badge badge--in_transit" id="gps-status">Starting…</span></div>' +
         '<div class="card__body"><p class="text-muted" id="gps-message">Waiting for location…</p></div>' +
       '</section>';
 
@@ -2115,8 +1988,7 @@
     const confirmed = await Modal.confirm({
       title: "End trip?",
       message: "This will mark the trip as completed and stop GPS tracking.",
-      confirmLabel: "End trip",
-      danger: true
+      confirmLabel: "End trip", danger: true
     });
     if (!confirmed) return;
 
@@ -2144,8 +2016,7 @@
       renderLoading(list, "Loading trips…");
 
       try {
-        const { data, error } = await supabase
-          .from("trips")
+        const { data, error } = await supabase.from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
           .eq("driver_id", AppState.authUser.id)
           .order("planned_departure", { ascending: false });
@@ -2165,17 +2036,12 @@
     subtitle: "Validate a passenger's QR ticket against the database.",
     render: async function (container) {
       container.innerHTML =
-        '<section class="card">' +
-          '<div class="card__header"><h3 class="card__title">Ticket code</h3></div>' +
-          '<div class="card__body">' +
-            '<div class="field">' +
-              '<label for="ticket-code-input">Enter or scan the ticket code</label>' +
-              '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" />' +
-            '</div>' +
-            '<button type="button" class="button button--primary" id="validate-ticket-button">Validate ticket</button>' +
-          '</div>' +
-        '</section>' +
-        '<div id="scan-result"></div>';
+        '<section class="card"><div class="card__header"><h3 class="card__title">Ticket code</h3></div>' +
+        '<div class="card__body">' +
+          '<div class="field"><label for="ticket-code-input">Enter or scan the ticket code</label>' +
+            '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" /></div>' +
+          '<button type="button" class="button button--primary" id="validate-ticket-button">Validate ticket</button>' +
+        '</div></section><div id="scan-result"></div>';
 
       const input = document.getElementById("ticket-code-input");
       const button = document.getElementById("validate-ticket-button");
@@ -2187,11 +2053,9 @@
 
         renderLoading(resultEl, "Validating…");
         try {
-          const { data: ticket, error } = await supabase
-            .from("tickets")
+          const { data: ticket, error } = await supabase.from("tickets")
             .select("*, bookings(*, trips(*, routes(origin, destination)))")
-            .eq("ticket_code", code)
-            .maybeSingle();
+            .eq("ticket_code", code).maybeSingle();
           if (error) throw error;
 
           if (!ticket) {
@@ -2236,13 +2100,10 @@
   });
 
   function scannerResult(type, icon, title, message) {
-    return (
-      '<div class="scanner-result scanner-result--' + type + '">' +
-        '<span class="scanner-result__icon" aria-hidden="true">' + icon + '</span>' +
-        '<p class="scanner-result__title">' + escapeHtml(title) + '</p>' +
-        '<p class="scanner-result__message">' + escapeHtml(message) + '</p>' +
-      '</div>'
-    );
+    return '<div class="scanner-result scanner-result--' + type + '">' +
+      '<span class="scanner-result__icon" aria-hidden="true">' + icon + '</span>' +
+      '<p class="scanner-result__title">' + escapeHtml(title) + '</p>' +
+      '<p class="scanner-result__message">' + escapeHtml(message) + '</p></div>';
   }
 
 
@@ -2444,7 +2305,10 @@
     }
   });
 
-    Router.register("admin-drivers", {
+  /* -----------------------------------------------------------------------
+     Driver approval — includes automatic vehicle assignment through the UI.
+     ----------------------------------------------------------------------- */
+  Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
     render: async function (container) {
@@ -2453,8 +2317,6 @@
       renderLoading(list, "Loading drivers…");
 
       try {
-        /* Fetch drivers AND vehicles in one shot so we can show assignments
-           next to each driver. */
         const [driversRes, vehiclesRes] = await Promise.all([
           supabase.from("profiles").select("*").eq("role", "driver").order("created_at", { ascending: false }),
           supabase.from("vehicles").select("*").order("registration_number", { ascending: true })
@@ -2470,57 +2332,40 @@
           return;
         }
 
-        // Build a lookup: driver.id -> vehicle object
         const vehicleByDriver = {};
         vehicles.forEach(function (v) {
-          if (v.assigned_driver_id) {
-            vehicleByDriver[v.assigned_driver_id] = v;
-          }
+          if (v.assigned_driver_id) vehicleByDriver[v.assigned_driver_id] = v;
         });
 
         list.innerHTML = '<div class="list">' + drivers.map(function (d) {
           const vehicle = vehicleByDriver[d.id];
           const vehicleLine = vehicle
-            ? '<span class="badge badge--in_transit" style="margin-left:6px;">🚌 ' +
-                escapeHtml(vehicle.registration_number) + '</span>'
+            ? '<span class="badge badge--in_transit" style="margin-left:6px;">🚌 ' + escapeHtml(vehicle.registration_number) + '</span>'
             : '<span class="badge badge--pending" style="margin-left:6px;">No vehicle</span>';
 
-          return '<div class="list__item">' +
-            '<div class="list__main">' +
-              '<p class="list__title">' + escapeHtml(d.full_name || "—") + ' ' + vehicleLine + '</p>' +
-              '<p class="list__meta">' + escapeHtml(d.email || "") + ' · ' +
-                escapeHtml(humanizeStatus(d.status || "pending")) +
-                (vehicle ? ' · ' + escapeHtml(vehicle.capacity) + ' seats' : "") + '</p>' +
-            '</div>' +
+          return '<div class="list__item"><div class="list__main">' +
+            '<p class="list__title">' + escapeHtml(d.full_name || "—") + ' ' + vehicleLine + '</p>' +
+            '<p class="list__meta">' + escapeHtml(d.email || "") + ' · ' +
+              escapeHtml(humanizeStatus(d.status || "pending")) +
+              (vehicle ? ' · ' + escapeHtml(vehicle.capacity) + ' seats' : "") + '</p></div>' +
             '<div class="list__actions">' +
               '<button type="button" class="button button--small button--secondary" data-assign="' + escapeHtml(d.id) + '">' +
-                (vehicle ? 'Change vehicle' : 'Assign vehicle') +
-              '</button>' +
+                (vehicle ? 'Change vehicle' : 'Assign vehicle') + '</button>' +
               (d.status !== "approved"
                 ? '<button type="button" class="button button--small button--success" data-approve="' + escapeHtml(d.id) + '">Approve</button>'
                 : "") +
               (d.status !== "rejected"
                 ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>'
                 : "") +
-            '</div>' +
-          '</div>';
+            '</div></div>';
         }).join("") + '</div>';
 
-        /* Wire up Approve */
         list.querySelectorAll("[data-approve]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            updateDriverStatus(btn.getAttribute("data-approve"), "approved");
-          });
+          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-approve"), "approved"); });
         });
-
-        /* Wire up Reject */
         list.querySelectorAll("[data-reject]").forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            updateDriverStatus(btn.getAttribute("data-reject"), "rejected");
-          });
+          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-reject"), "rejected"); });
         });
-
-        /* Wire up Assign vehicle */
         list.querySelectorAll("[data-assign]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             const driverId = btn.getAttribute("data-assign");
@@ -2528,40 +2373,26 @@
             if (driver) openAssignVehicleModal(driver, vehicles, vehicleByDriver);
           });
         });
-
-      } catch (err) {
-        renderError(list, err.message);
-      }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
-
-  /* -----------------------------------------------------------------------
-     Vehicle assignment modal
-     Shows every vehicle. Vehicles already assigned to another driver are
-     marked "currently assigned to another driver" and disabled.
-     Saving updates the vehicles table — no SQL required.
-     ----------------------------------------------------------------------- */
+  /* Vehicle assignment modal — admin assigns a vehicle to a driver
+     without touching SQL. */
   function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
     const currentVehicle = vehicleByDriver[driver.id];
 
-    /* Build <option> list. */
     const options = vehicles.map(function (v) {
       const ownerId = v.assigned_driver_id;
       const isMine = ownerId === driver.id;
       const isSomeoneElses = ownerId && ownerId !== driver.id;
 
-      let label = v.registration_number +
-        " · " + v.capacity + " seats" +
+      let label = v.registration_number + " · " + v.capacity + " seats" +
         (v.vehicle_type ? " · " + v.vehicle_type : "");
 
-      if (isMine) {
-        label += " — currently assigned to this driver";
-      } else if (isSomeoneElses) {
-        label += " — already assigned to another driver";
-      } else {
-        label += " — available";
-      }
+      if (isMine) label += " — currently assigned to this driver";
+      else if (isSomeoneElses) label += " — already assigned to another driver";
+      else label += " — available";
 
       return '<option value="' + escapeHtml(v.id) + '"' +
         (isMine ? ' selected' : '') +
@@ -2577,8 +2408,7 @@
         '<div class="field">' +
           '<label for="assign-vehicle-select">Vehicle</label>' +
           '<select id="assign-vehicle-select">' +
-            '<option value="">— No vehicle —</option>' +
-            options +
+            '<option value="">— No vehicle —</option>' + options +
           '</select>' +
         '</div>',
       footer:
@@ -2592,46 +2422,113 @@
 
         Loader.show("Saving assignment…");
         try {
-          /* 1. Clear any current assignment for this driver. */
           if (currentVehicle && currentVehicle.id !== newVehicleId) {
-            await supabase
-              .from("vehicles")
+            await supabase.from("vehicles")
               .update({ assigned_driver_id: null })
               .eq("id", currentVehicle.id);
           }
 
-          /* 2. Assign the new vehicle if one was chosen. */
           if (newVehicleId) {
-            const { error } = await supabase
-              .from("vehicles")
+            const { error } = await supabase.from("vehicles")
               .update({ assigned_driver_id: driver.id })
               .eq("id", newVehicleId);
             if (error) throw error;
           }
 
-          await Data.logAudit(
-            "vehicle_assigned",
-            "vehicle",
-            newVehicleId || null,
-            { driver_id: driver.id, driver_name: driver.full_name }
-          );
+          await Data.logAudit("vehicle_assigned", "vehicle", newVehicleId || null,
+            { driver_id: driver.id, driver_name: driver.full_name });
 
           Modal.close();
-          Toast.success(
-            "Vehicle assignment saved",
-            newVehicleId
-              ? "The driver can now publish trips using this vehicle."
-              : "The driver no longer has a vehicle assigned."
-          );
-
-          /* Refresh the driver list so the badge updates immediately. */
+          Toast.success("Vehicle assignment saved",
+            newVehicleId ? "The driver can now publish trips using this vehicle."
+                         : "The driver no longer has a vehicle assigned.");
           Router.go("admin-drivers");
-
         } catch (err) {
           Toast.error("Unable to assign vehicle", err.message);
-        } finally {
-          Loader.hide();
+        } finally { Loader.hide(); }
+      }
+    });
+  }
+
+  async function updateDriverStatus(driverId, status) {
+    Loader.show("Updating…");
+    try {
+      const { error } = await supabase.from("profiles").update({ status: status }).eq("id", driverId);
+      if (error) throw error;
+
+      await Data.logAudit("driver_" + status, "profile", driverId, null);
+
+      await Notifications.create({
+        recipient_id: driverId,
+        title: "Account " + status,
+        message: "Your driver account has been " + status + ".",
+        type: "driver_status",
+        related_entity: driverId
+      });
+
+      Toast.success("Driver " + status);
+      Router.go("admin-drivers");
+    } catch (err) { Toast.error("Unable to update driver", err.message); }
+    finally { Loader.hide(); }
+  }
+
+  Router.register("admin-operators", {
+    title: "Operators",
+    subtitle: "Transport companies on the platform.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="add-operator">+ Add operator</button>',
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="operators-list"></div></div>';
+      const list = document.getElementById("operators-list");
+      renderLoading(list, "Loading operators…");
+
+      const addBtn = document.getElementById("add-operator");
+      if (addBtn) addBtn.addEventListener("click", openAddOperatorModal);
+
+      try {
+        const data = await Data.getOperators();
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🏢", title: "No operators", message: "Add your first transport operator." });
+          return;
         }
+        list.innerHTML = '<div class="list">' + data.map(function (o) {
+          return '<div class="list__item"><div class="list__main">' +
+            '<p class="list__title">' + escapeHtml(o.name) + '</p>' +
+            '<p class="list__meta">' + escapeHtml(o.contact_name || "") + ' · ' + escapeHtml(o.phone || "") + '</p></div>' +
+            '<span class="badge badge--' + escapeHtml(o.status || "active") + '">' +
+              escapeHtml(humanizeStatus(o.status || "active")) + '</span></div>';
+        }).join("") + '</div>';
+      } catch (err) { renderError(list, err.message); }
+    }
+  });
+
+  function openAddOperatorModal() {
+    Modal.open({
+      title: "Add operator",
+      body: '<div class="field"><label for="op-name">Operator name</label><input type="text" id="op-name" /></div>' +
+        '<div class="field"><label for="op-contact">Contact name</label><input type="text" id="op-contact" /></div>' +
+        '<div class="field"><label for="op-phone">Phone</label><input type="tel" id="op-phone" /></div>' +
+        '<div class="field"><label for="op-email">Email</label><input type="email" id="op-email" /></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const name = document.getElementById("op-name").value.trim();
+        if (!name) { Toast.warning("Name required"); return; }
+        Loader.show("Saving…");
+        try {
+          const { error } = await supabase.from("operators").insert({
+            name: name,
+            contact_name: document.getElementById("op-contact").value.trim() || null,
+            phone: document.getElementById("op-phone").value.trim() || null,
+            email: document.getElementById("op-email").value.trim() || null,
+            status: "active"
+          });
+          if (error) throw error;
+          Modal.close();
+          Toast.success("Operator added");
+          Router.go("admin-operators");
+        } catch (err) { Toast.error("Unable to save", err.message); }
+        finally { Loader.hide(); }
       }
     });
   }
@@ -2754,8 +2651,7 @@
         Loader.show("Saving…");
         try {
           const { error } = await supabase.from("routes").insert({
-            origin: origin,
-            destination: destination,
+            origin: origin, destination: destination,
             base_fare: Number(document.getElementById("route-fare").value) || null,
             estimated_minutes: Number(document.getElementById("route-minutes").value) || null,
             status: "active"
@@ -2775,7 +2671,7 @@
   /* =======================================================================
      20. VEHICLE MANAGEMENT
      ======================================================================= */
-    Router.register("admin-vehicles", {
+  Router.register("admin-vehicles", {
     title: "Vehicles",
     subtitle: "All registered vehicles.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-vehicle">+ Add vehicle</button>',
@@ -2788,7 +2684,6 @@
       if (addBtn) addBtn.addEventListener("click", openAddVehicleModal);
 
       try {
-        /* Fetch vehicles + all driver profiles so we can show names. */
         const [vehiclesRes, driversRes] = await Promise.all([
           supabase.from("vehicles").select("*").order("registration_number", { ascending: true }),
           supabase.from("profiles").select("id, full_name").eq("role", "driver")
@@ -2963,8 +2858,7 @@
     title: "Reports",
     subtitle: "Operational analytics from real data.",
     render: async function (container) {
-      container.innerHTML =
-        '<section class="card"><div class="card__header"><h3 class="card__title">Trips by status</h3></div>' +
+      container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Trips by status</h3></div>' +
         '<div class="card__body" id="trips-by-status"></div></section>';
 
       try {
@@ -3082,9 +2976,7 @@
     async join(tripId) {
       if (!supabase || !AppState.authUser) return null;
       const { data, error } = await supabase.from("waitlist").insert({
-        passenger_id: AppState.authUser.id,
-        trip_id: tripId,
-        status: "waiting"
+        passenger_id: AppState.authUser.id, trip_id: tripId, status: "waiting"
       }).select().single();
       if (error) throw error;
       return data;
@@ -3195,8 +3087,7 @@
         const trip = booking.trips || {};
         const route = trip.routes || {};
 
-        container.innerHTML =
-          '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
+        container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
           '<div class="card__body"><p class="text-muted mb-4">' +
             escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
             '<form id="feedback-form">' +
@@ -3210,8 +3101,7 @@
               '<div class="field"><label for="feedback-comment">Comments</label>' +
                 '<textarea id="feedback-comment" placeholder="Share your experience…"></textarea></div>' +
               '<div class="form-actions"><button type="submit" class="button button--primary">Submit feedback</button></div>' +
-            '</form>' +
-          '</div></section>';
+            '</form></div></section>';
 
         document.getElementById("feedback-form").addEventListener("submit", async function (event) {
           event.preventDefault();
@@ -3430,7 +3320,7 @@
       });
     });
 
-    /* ----- Sign in ----- */
+    /* ----- Sign in (with timeout recovery) ----- */
     if (signinForm) {
       signinForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3452,6 +3342,16 @@
         try {
           await Auth.signIn(email, password);
         } catch (err) {
+          /* Timeout recovery — clear storage and reload, avoiding the
+             infinite "Signing in…" state on second sign-in. */
+          if (err && err.code === "SIGNIN_TIMEOUT") {
+            setFormMessage("auth-message", "warning",
+              "Sign-in is taking too long. Reloading to try again…");
+            clearSupabaseStorage();
+            setTimeout(function () { window.location.reload(); }, 1200);
+            return;
+          }
+
           const msg = (err && err.message) ? err.message : "";
           if (/email not confirmed|email not verified|confirm/i.test(msg)) {
             const container = document.getElementById("auth-message");
