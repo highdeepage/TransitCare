@@ -70,7 +70,7 @@
      ======================================================================= */
   let supabase = null;
 
-    function initSupabase() {
+      function initSupabase() {
     if (!IS_SUPABASE_CONFIGURED) {
       console.warn("[TransitCare] Supabase is not configured.");
       return null;
@@ -87,7 +87,39 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true
+            detectSessionInUrl: true,
+
+            /* -------------------------------------------------------------
+               Bulletproof lock override.
+
+               Supabase uses the browser's Web Locks API to coordinate
+               auth across tabs. On some mobile browsers and in-app
+               webviews, that lock never releases, so sign-in, session
+               checks and any auth-gated query hang forever.
+
+               Different versions of supabase-js pass the "acquire"
+               callback in different argument positions. This override
+               finds the callback wherever it is and calls it, so it
+               works with every version.
+               ------------------------------------------------------------- */
+            lock: function () {
+              // Collect all arguments Supabase passed
+              var args = Array.prototype.slice.call(arguments);
+              // Find the one that is a function (the acquire callback)
+              var acquire = null;
+              for (var i = 0; i < args.length; i++) {
+                if (typeof args[i] === "function") {
+                  acquire = args[i];
+                  break;
+                }
+              }
+              // If we found it, call it and return its promise
+              if (acquire) {
+                return acquire();
+              }
+              // Otherwise, just resolve immediately
+              return Promise.resolve(null);
+            }
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
