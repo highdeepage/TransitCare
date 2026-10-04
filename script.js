@@ -20,10 +20,17 @@
     GPS_UPDATE_INTERVAL_MS: 12000,
     GPS_STALE_THRESHOLD_MS: 60000,
     BOARDING_WINDOW_MINUTES: 10,
+    WAITLIST_OFFER_MINUTES: 5,
+    RESCHEDULE_CUTOFF_MINUTES: 15,
+    SIGNIN_TIMEOUT_MS: 10000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
+
+  const IS_SUPABASE_CONFIGURED =
+    !!TRANSITCARE_CONFIG.SUPABASE_URL &&
+    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY;
 
 
   /* =======================================================================
@@ -71,13 +78,16 @@
 
   /* =======================================================================
      03. SUPABASE INITIALIZATION
-     Simple lock override — this is the version that worked.
      ======================================================================= */
   let supabase = null;
 
   function initSupabase() {
+    if (!IS_SUPABASE_CONFIGURED) {
+      console.warn("[TransitCare] Supabase is not configured.");
+      return null;
+    }
     if (typeof window.supabase === "undefined" || !window.supabase.createClient) {
-      console.error("[TransitCare] Supabase library did not load.");
+      console.error("[TransitCare] Supabase library did not load from CDN.");
       return null;
     }
     try {
@@ -89,8 +99,22 @@
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: true,
-            lock: function (_name, acquire) {
-              return acquire();
+
+            /* Defensive lock override: finds the callback wherever
+               Supabase puts it, calls it, and never leaves the promise
+               pending. Fixes hangs on mobile Safari and in-app webviews. */
+            lock: function () {
+              try {
+                var args = Array.prototype.slice.call(arguments);
+                for (var i = 0; i < args.length; i++) {
+                  if (typeof args[i] === "function") {
+                    return Promise.resolve(args[i]());
+                  }
+                }
+              } catch (err) {
+                console.warn("[TransitCare] Lock acquire threw:", err);
+              }
+              return Promise.resolve(null);
             }
           },
           realtime: { params: { eventsPerSecond: 5 } }
@@ -115,7 +139,8 @@
     notifications: [],
     channels: { notifications: null, tripLocations: null },
     gpsWatchId: null,
-    activeTrip: null
+    activeTrip: null,
+    cache: { terminals: null, operators: null, routes: null }
   };
 
   function resetState() {
@@ -125,6 +150,7 @@
     AppState.currentView = "home";
     AppState.notifications = [];
     AppState.activeTrip = null;
+    AppState.cache = { terminals: null, operators: null, routes: null };
     stopAllRealtime();
     stopGpsWatch();
   }
@@ -217,6 +243,16 @@
   }
 
   function nowIso() { return new Date().toISOString(); }
+
+  function clearSupabaseStorage() {
+    try {
+      Object.keys(localStorage).forEach(function (key) {
+        if (key.indexOf("sb-") === 0 || key.indexOf("supabase") === 0) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) { /* ignore */ }
+  }
 
 
   /* =======================================================================
@@ -523,7 +559,7 @@
 
 
   /* =======================================================================
-     10. AUTHENTICATION — simple, direct, no timeouts
+     10. AUTHENTICATION
      ======================================================================= */
   const Auth = {
 
@@ -563,9 +599,24 @@
 
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-      return data;
+
+      /* Race the sign-in against a timeout so a stuck Web Lock can
+         never leave the user staring at "Signing in…" forever. */
+      const signInPromise = supabase.auth.signInWithPassword({ email, password })
+        .then(function (result) {
+          if (result.error) throw result.error;
+          return result.data;
+        });
+
+      const timeoutPromise = new Promise(function (_, reject) {
+        setTimeout(function () {
+          const err = new Error("Sign-in is taking too long.");
+          err.code = "SIGNIN_TIMEOUT";
+          reject(err);
+        }, TRANSITCARE_CONFIG.SIGNIN_TIMEOUT_MS);
+      });
+
+      return Promise.race([signInPromise, timeoutPromise]);
     },
 
     async resendVerification(email) {
@@ -593,10 +644,23 @@
     },
 
     async signOut() {
+      /* Close realtime first so the old token is not kept alive. */
       stopAllRealtime();
+
       if (supabase) {
-        try { await supabase.auth.signOut(); } catch (err) { console.warn(err); }
+        try {
+          await Promise.race([
+            supabase.auth.signOut(),
+            new Promise(function (resolve) { setTimeout(resolve, 3000); })
+          ]);
+        } catch (err) {
+          console.warn("[TransitCare] Sign-out error (ignored):", err);
+        }
       }
+
+      /* Belt and braces: clear any leftover sb- keys. */
+      clearSupabaseStorage();
+
       resetState();
       showAuthScreen();
     },
@@ -605,9 +669,13 @@
       if (!supabase) return null;
       try {
         const { data, error } = await supabase.auth.getSession();
-        if (error) return null;
+        if (error) {
+          console.warn("[TransitCare] getSession error:", error.message);
+          return null;
+        }
         return data.session;
       } catch (err) {
+        console.warn("[TransitCare] getSession failed:", err);
         return null;
       }
     }
@@ -919,15 +987,17 @@
       const firstName = String(name).split(" ")[0];
 
       container.innerHTML =
-        '<section class="card"><div class="card__body">' +
-          '<p class="eyebrow">Eko TransitCare</p>' +
-          '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
-          '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
-          '<div class="button-group mt-4">' +
-            '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
-            '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
+        '<section class="card">' +
+          '<div class="card__body">' +
+            '<p class="eyebrow">Eko TransitCare</p>' +
+            '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
+            '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
+            '<div class="button-group mt-4">' +
+              '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
+              '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
+            '</div>' +
           '</div>' +
-        '</div></section>' +
+        '</section>' +
         '<section class="card"><div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
         '<div class="card__body" id="home-upcoming"></div></section>' +
         '<section class="card"><div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
@@ -1488,7 +1558,7 @@
           '<span class="map-overlay__value">The driver has not started sharing location yet.</span></div>');
       }
     } catch (err) {
-      mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable.</div>';
+      mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable. ' + escapeHtml(err.message) + '</div>';
     }
   }
 
@@ -2235,6 +2305,9 @@
     }
   });
 
+  /* -----------------------------------------------------------------------
+     Driver approval — includes automatic vehicle assignment through the UI.
+     ----------------------------------------------------------------------- */
   Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
@@ -2304,6 +2377,8 @@
     }
   });
 
+  /* Vehicle assignment modal — admin assigns a vehicle to a driver
+     without touching SQL. */
   function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
     const currentVehicle = vehicleByDriver[driver.id];
 
@@ -2514,6 +2589,7 @@
             status: "active"
           });
           if (error) throw error;
+          AppState.cache.terminals = null;
           Modal.close();
           Toast.success("Terminal added");
           Router.go("admin-terminals");
@@ -2581,6 +2657,7 @@
             status: "active"
           });
           if (error) throw error;
+          AppState.cache.routes = null;
           Modal.close();
           Toast.success("Route added");
           Router.go("admin-routes");
@@ -2867,7 +2944,55 @@
 
 
   /* =======================================================================
-     23. NOTIFICATIONS
+     23–25. TICKETING / SEAT / WAITLIST
+     ======================================================================= */
+  async function runAutomaticSeatRelease() {
+    if (!supabase) return 0;
+    const cutoff = new Date(Date.now() - TRANSITCARE_CONFIG.BOARDING_WINDOW_MINUTES * 60000).toISOString();
+    const { data: stale } = await supabase.from("bookings")
+      .select("id, trip_id, seat_number, passenger_id")
+      .eq("status", "reserved").lt("created_at", cutoff);
+    if (!stale || stale.length === 0) return 0;
+
+    let released = 0;
+    for (const booking of stale) {
+      const { error } = await supabase.from("bookings").update({ status: "no_show" }).eq("id", booking.id);
+      if (!error) {
+        released++;
+        await Data.logAudit("seat_auto_released", "booking", booking.id, { seat: booking.seat_number });
+        await Notifications.create({
+          recipient_id: booking.passenger_id,
+          title: "Seat released",
+          message: "Seat " + booking.seat_number + " was released because you did not board in time.",
+          type: "seat_released",
+          related_entity: booking.id
+        });
+      }
+    }
+    return released;
+  }
+
+  const Waitlist = {
+    async join(tripId) {
+      if (!supabase || !AppState.authUser) return null;
+      const { data, error } = await supabase.from("waitlist").insert({
+        passenger_id: AppState.authUser.id, trip_id: tripId, status: "waiting"
+      }).select().single();
+      if (error) throw error;
+      return data;
+    },
+    async listForTrip(tripId) {
+      if (!supabase) return [];
+      const { data, error } = await supabase.from("waitlist").select("*")
+        .eq("trip_id", tripId).eq("status", "waiting").order("created_at", { ascending: true });
+      if (error) throw error;
+      return data || [];
+    }
+  };
+
+
+  /* =======================================================================
+     26. NOTIFICATIONS
      ======================================================================= */
   const Notifications = {
     async fetch() {
@@ -2941,21 +3066,125 @@
 
 
   /* =======================================================================
+     27. FEEDBACK
+     ======================================================================= */
+  Router.register("feedback", {
+    title: "Leave feedback",
+    subtitle: "Help improve TransitCare.",
+    render: async function (container) {
+      try {
+        const { data: bookings } = await supabase.from("bookings")
+          .select("*, trips(*, routes(origin, destination))")
+          .eq("passenger_id", AppState.authUser.id).eq("status", "boarded")
+          .order("created_at", { ascending: false }).limit(1);
+
+        if (!bookings || bookings.length === 0) {
+          renderEmpty(container, { icon: "⭐", title: "No eligible trips", message: "You can leave feedback after completing a trip." });
+          return;
+        }
+
+        const booking = bookings[0];
+        const trip = booking.trips || {};
+        const route = trip.routes || {};
+
+        container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
+          '<div class="card__body"><p class="text-muted mb-4">' +
+            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+            '<form id="feedback-form">' +
+              '<div class="field"><label>Overall rating</label>' +
+                '<div class="rating-input">' +
+                  [5, 4, 3, 2, 1].map(function (n) {
+                    return '<input type="radio" name="rating" id="rating-' + n + '" value="' + n + '" />' +
+                      '<label for="rating-' + n + '" aria-label="' + n + ' stars">★</label>';
+                  }).join("") +
+                '</div></div>' +
+              '<div class="field"><label for="feedback-comment">Comments</label>' +
+                '<textarea id="feedback-comment" placeholder="Share your experience…"></textarea></div>' +
+              '<div class="form-actions"><button type="submit" class="button button--primary">Submit feedback</button></div>' +
+            '</form></div></section>';
+
+        document.getElementById("feedback-form").addEventListener("submit", async function (event) {
+          event.preventDefault();
+          const ratingEl = document.querySelector('input[name="rating"]:checked');
+          if (!ratingEl) { Toast.warning("Please select a rating"); return; }
+          const rating = Number(ratingEl.value);
+          const comment = document.getElementById("feedback-comment").value.trim();
+
+          Loader.show("Submitting…");
+          try {
+            const { error } = await supabase.from("feedback").insert({
+              passenger_id: AppState.authUser.id,
+              trip_id: trip.id,
+              overall_rating: rating,
+              comment: comment || null
+            });
+            if (error) throw error;
+            Toast.success("Thank you for your feedback");
+            Router.go("home");
+          } catch (err) { Toast.error("Unable to submit feedback", err.message); }
+          finally { Loader.hide(); }
+        });
+      } catch (err) { renderError(container, err.message); }
+    }
+  });
+
+
+  /* =======================================================================
+     28. AUDIT LOGS
+     ======================================================================= */
+  Router.register("admin-audit", {
+    title: "Audit log",
+    subtitle: "Recent administrative activity.",
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body" id="audit-full-list"></div></div>';
+      const list = document.getElementById("audit-full-list");
+      renderLoading(list, "Loading audit log…");
+
+      try {
+        const { data, error } = await supabase.from("audit_logs").select("*")
+          .order("created_at", { ascending: false }).limit(200);
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "📝", title: "No audit entries", message: "Administrative actions will be logged here." });
+          return;
+        }
+        list.innerHTML = data.map(function (log) {
+          return '<div class="audit-entry">' +
+            '<span class="audit-entry__time">' + escapeHtml(formatDateTime(log.created_at)) + '</span>' +
+            '<span class="audit-entry__text">' + escapeHtml(log.action || "action") +
+              (log.entity_type ? ' · ' + escapeHtml(log.entity_type) : "") +
+              (log.entity_id ? ' (' + escapeHtml(String(log.entity_id).slice(0, 8)) + ')' : "") + '</span></div>';
+        }).join("");
+      } catch (err) { renderError(list, err.message); }
+    }
+  });
+
+
+  /* =======================================================================
+     29. ERROR HANDLING
+     ======================================================================= */
+  window.addEventListener("error", function (event) {
+    console.error("[TransitCare] Unhandled error:", event.error || event.message);
+  });
+
+  window.addEventListener("unhandledrejection", function (event) {
+    console.error("[TransitCare] Unhandled promise rejection:", event.reason);
+  });
+
+
+  /* =======================================================================
      UI HELPERS
      ======================================================================= */
   function showAuthScreen() {
-    const authScreen = document.getElementById("auth-screen");
-    const appShell = document.getElementById("app-shell");
-    if (authScreen) authScreen.classList.remove("is-hidden");
-    if (appShell) appShell.classList.add("is-hidden");
+    document.getElementById("auth-screen").classList.remove("is-hidden");
+    document.getElementById("app-shell").classList.add("is-hidden");
     document.body.style.overflow = "";
   }
 
   function showAppShell() {
-    const authScreen = document.getElementById("auth-screen");
-    const appShell = document.getElementById("app-shell");
-    if (authScreen) authScreen.classList.add("is-hidden");
-    if (appShell) appShell.classList.remove("is-hidden");
+    document.getElementById("auth-screen").classList.add("is-hidden");
+    document.getElementById("app-shell").classList.remove("is-hidden");
   }
 
   function updateHeaderUser() {
@@ -2968,22 +3197,19 @@
   }
 
   function openSidebar() {
-    const shell = document.getElementById("app-shell");
-    if (shell) shell.classList.add("sidebar-open");
+    document.getElementById("app-shell").classList.add("sidebar-open");
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.setAttribute("aria-expanded", "true");
   }
 
   function closeSidebar() {
-    const shell = document.getElementById("app-shell");
-    if (shell) shell.classList.remove("sidebar-open");
+    document.getElementById("app-shell").classList.remove("sidebar-open");
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.setAttribute("aria-expanded", "false");
   }
 
   function toggleSidebar() {
     const shell = document.getElementById("app-shell");
-    if (!shell) return;
     if (shell.classList.contains("sidebar-open")) closeSidebar();
     else openSidebar();
   }
@@ -3094,7 +3320,7 @@
       });
     });
 
-    /* ----- Sign in ----- */
+    /* ----- Sign in (with timeout recovery) ----- */
     if (signinForm) {
       signinForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3115,8 +3341,17 @@
 
         try {
           await Auth.signIn(email, password);
-          /* onAuthStateChange will handle the rest */
         } catch (err) {
+          /* Timeout recovery — clear storage and reload, avoiding the
+             infinite "Signing in…" state on second sign-in. */
+          if (err && err.code === "SIGNIN_TIMEOUT") {
+            setFormMessage("auth-message", "warning",
+              "Sign-in is taking too long. Reloading to try again…");
+            clearSupabaseStorage();
+            setTimeout(function () { window.location.reload(); }, 1200);
+            return;
+          }
+
           const msg = (err && err.message) ? err.message : "";
           if (/email not confirmed|email not verified|confirm/i.test(msg)) {
             const container = document.getElementById("auth-message");
@@ -3269,7 +3504,7 @@
 
 
   /* =======================================================================
-     24. BOOTSTRAP
+     30. BOOTSTRAP
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
@@ -3371,7 +3606,8 @@
       return;
     }
 
-    /* Register listener FIRST so we catch SIGNED_IN events. */
+    let handled = false;
+
     supabase.auth.onAuthStateChange(async function (event, session) {
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
@@ -3380,46 +3616,39 @@
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
         if (resetForm) resetForm.classList.remove("is-hidden");
+        handled = true;
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        if (session && session.user && !AppState.authUser) {
-          try {
-            await handleSignedIn(session);
-          } catch (err) {
-            console.error("[TransitCare] handleSignedIn failed:", err);
-          }
-        }
-        return;
-      }
-
-      if (event === "SIGNED_OUT") {
+      if (event === "SIGNED_OUT" || !session) {
         resetState();
         showAuthScreen();
+        handled = true;
         return;
       }
 
-      if (event === "INITIAL_SESSION" && session && session.user && !AppState.authUser) {
+      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" ||
+          event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
         try {
           await handleSignedIn(session);
         } catch (err) {
-          console.error("[TransitCare] handleSignedIn failed:", err);
+          console.warn("[TransitCare] handleSignedIn failed:", err);
+          showAuthScreen();
         }
+        handled = true;
       }
     });
 
-    /* Then check for an existing session on page load. */
     try {
       const session = await Auth.getSession();
-      if (session && session.user && !AppState.authUser) {
+      if (session) {
         await handleSignedIn(session);
-      } else if (!AppState.authUser) {
+      } else if (!handled) {
         showAuthScreen();
       }
     } catch (err) {
-      console.warn("[TransitCare] Session check failed:", err);
-      if (!AppState.authUser) showAuthScreen();
+      console.warn("[TransitCare] Initial session check failed:", err);
+      if (!handled) showAuthScreen();
     }
   }
 
