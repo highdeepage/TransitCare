@@ -1,5 +1,3 @@
-
-
 /* =========================================================================
    EKO TRANSITCARE — APPLICATION LOGIC
    "Know Your Ride Before You Leave."
@@ -24,15 +22,15 @@
     BOARDING_WINDOW_MINUTES: 10,
     WAITLIST_OFFER_MINUTES: 5,
     RESCHEDULE_CUTOFF_MINUTES: 15,
-    SIGNIN_TIMEOUT_MS: 10000,
+    SIGNIN_TIMEOUT_MS: 12000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
 
   const IS_SUPABASE_CONFIGURED =
-    !!TRANSITCARE_CONFIG.SUPABASE_URL &&
-    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY;
+    Boolean(TRANSITCARE_CONFIG.SUPABASE_URL) &&
+    Boolean(TRANSITCARE_CONFIG.SUPABASE_ANON_KEY);
 
 
   /* =======================================================================
@@ -98,6 +96,7 @@
         TRANSITCARE_CONFIG.SUPABASE_ANON_KEY,
         {
           auth: {
+            storage: window.localStorage,
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: true
@@ -125,6 +124,7 @@
     channels: { notifications: null, tripLocations: null },
     gpsWatchId: null,
     activeTrip: null,
+    isSigningIn: false,
     cache: { terminals: null, operators: null, routes: null }
   };
 
@@ -135,6 +135,7 @@
     AppState.currentView = "home";
     AppState.notifications = [];
     AppState.activeTrip = null;
+    AppState.isSigningIn = false;
     AppState.cache = { terminals: null, operators: null, routes: null };
     stopAllRealtime();
     stopGpsWatch();
@@ -585,8 +586,6 @@
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
 
-      /* Race the sign-in against a timeout so a stuck Web Lock can
-         never leave the user staring at "Signing in…" forever. */
       const signInPromise = supabase.auth.signInWithPassword({ email, password })
         .then(function (result) {
           if (result.error) throw result.error;
@@ -629,23 +628,20 @@
     },
 
     async signOut() {
-      /* Close realtime first so the old token is not kept alive. */
       stopAllRealtime();
 
       if (supabase) {
         try {
           await Promise.race([
             supabase.auth.signOut(),
-            new Promise(function (resolve) { setTimeout(resolve, 3000); })
+            new Promise(function (resolve) { setTimeout(resolve, 2500); })
           ]);
         } catch (err) {
           console.warn("[TransitCare] Sign-out error (ignored):", err);
         }
       }
 
-      /* Belt and braces: clear any leftover sb- keys. */
       clearSupabaseStorage();
-
       resetState();
       showAuthScreen();
     },
@@ -793,13 +789,22 @@
         const badgeCount = item.badgeKey ? countBadge(item.badgeKey) : 0;
         return (
           '<button type="button" class="app-nav__item' + (isActive ? " is-active" : "") +
-            '" data-nav-link data-view="' + escapeHtml(item.key) + '">' +
+            '" data-nav-view="' + escapeHtml(item.key) + '">' +
             '<span class="app-nav__icon" aria-hidden="true">' + escapeHtml(item.icon) + '</span>' +
             '<span class="app-nav__label">' + escapeHtml(item.label) + '</span>' +
             (badgeCount > 0 ? '<span class="app-nav__count">' + badgeCount + '</span>' : "") +
           '</button>'
         );
       }).join("");
+
+      sidebar.querySelectorAll("[data-nav-view]").forEach(function (el) {
+        el.addEventListener("click", function (event) {
+          event.preventDefault();
+          const view = el.getAttribute("data-nav-view");
+          if (view) Router.go(view);
+          closeSidebar();
+        });
+      });
     }
 
     if (bottomNav) {
@@ -812,7 +817,7 @@
         const badgeCount = item.badgeKey ? countBadge(item.badgeKey) : 0;
         return (
           '<button type="button" class="app-bottom-nav__item' + (isActive ? " is-active" : "") +
-            '" data-nav-link data-view="' + escapeHtml(item.key) + '">' +
+            '" data-bottom-view="' + escapeHtml(item.key) + '">' +
             '<span class="app-bottom-nav__icon" aria-hidden="true">' + escapeHtml(item.icon) +
               (badgeCount > 0 ? '<span class="icon-button__badge">' + badgeCount + '</span>' : "") +
             '</span>' +
@@ -820,16 +825,15 @@
           '</button>'
         );
       }).join("");
-    }
 
-    document.querySelectorAll("[data-nav-link]").forEach(function (el) {
-      el.addEventListener("click", function (event) {
-        event.preventDefault();
-        const view = el.getAttribute("data-view");
-        if (view) Router.go(view);
-        closeSidebar();
+      bottomNav.querySelectorAll("[data-bottom-view]").forEach(function (el) {
+        el.addEventListener("click", function (event) {
+          event.preventDefault();
+          const view = el.getAttribute("data-bottom-view");
+          if (view) Router.go(view);
+        });
       });
-    });
+    }
   }
 
 
@@ -978,8 +982,8 @@
             '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
             '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
             '<div class="button-group mt-4">' +
-              '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
-              '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
+              '<button type="button" class="button button--primary" data-home-view="search">🔍 Find a bus</button>' +
+              '<button type="button" class="button button--secondary" data-home-view="tickets">🎫 My tickets</button>' +
             '</div>' +
           '</div>' +
         '</section>' +
@@ -988,11 +992,9 @@
         '<section class="card"><div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
         '<div class="card__body card__body--flush" id="home-notifications"></div></section>';
 
-      document.querySelectorAll("[data-nav-link]").forEach(function (el) {
-        el.addEventListener("click", function (event) {
-          event.preventDefault();
-          const view = el.getAttribute("data-view");
-          if (view) Router.go(view);
+      container.querySelectorAll("[data-home-view]").forEach(function (el) {
+        el.addEventListener("click", function () {
+          Router.go(el.getAttribute("data-home-view"));
         });
       });
 
@@ -1274,13 +1276,11 @@
         seatsHtml +
         '<p class="text-small text-muted mt-4" id="selected-seat-label">No seat selected.</p>';
 
-      let selectedSeat = null;
-
       body.querySelectorAll(".seat--available").forEach(function (seatBtn) {
         seatBtn.addEventListener("click", function () {
           body.querySelectorAll(".seat--selected").forEach(function (el) { el.classList.remove("seat--selected"); });
           seatBtn.classList.add("seat--selected");
-          selectedSeat = Number(seatBtn.getAttribute("data-seat"));
+          const selectedSeat = Number(seatBtn.getAttribute("data-seat"));
           const label = document.getElementById("selected-seat-label");
           if (label) label.textContent = "Selected seat: " + selectedSeat;
           const confirmBtn = document.getElementById("modal-confirm-booking");
@@ -1479,7 +1479,7 @@
 
       try {
         const { data: trip, error } = await supabase.from("trips")
-          .select("*, routes(*), vehicles(*), profiles!trips_driver_id_fkey(full_name)")
+          .select("*, routes(*), vehicles(*), profiles:driver_id(full_name)")
           .eq("id", tripId).maybeSingle();
         if (error) throw error;
         if (!trip) {
@@ -2069,7 +2069,7 @@
 
           resultEl.innerHTML = scannerResult("valid", "✓", "Valid ticket",
             "Seat " + escapeHtml(booking.seat_number || "—") + " · " +
-            escapeHtml(booking.trips ? booking.trips.routes.origin + " → " + booking.trips.routes.destination : ""));
+            escapeHtml(booking.trips && booking.trips.routes ? booking.trips.routes.origin + " → " + booking.trips.routes.destination : ""));
           input.value = "";
         } catch (err) {
           Toast.error("Validation failed", err.message);
@@ -2290,9 +2290,6 @@
     }
   });
 
-  /* -----------------------------------------------------------------------
-     Driver approval — includes automatic vehicle assignment through the UI.
-     ----------------------------------------------------------------------- */
   Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
@@ -2362,8 +2359,6 @@
     }
   });
 
-  /* Vehicle assignment modal — admin assigns a vehicle to a driver
-     without touching SQL. */
   function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
     const currentVehicle = vehicleByDriver[driver.id];
 
@@ -2518,10 +2513,6 @@
     });
   }
 
-
-  /* =======================================================================
-     18. TERMINAL MANAGEMENT
-     ======================================================================= */
   Router.register("admin-terminals", {
     title: "Terminals",
     subtitle: "Boarding points across the network.",
@@ -2584,10 +2575,6 @@
     });
   }
 
-
-  /* =======================================================================
-     19. ROUTE MANAGEMENT
-     ======================================================================= */
   Router.register("admin-routes", {
     title: "Routes",
     subtitle: "Origins, destinations and fares.",
@@ -2652,10 +2639,6 @@
     });
   }
 
-
-  /* =======================================================================
-     20. VEHICLE MANAGEMENT
-     ======================================================================= */
   Router.register("admin-vehicles", {
     title: "Vehicles",
     subtitle: "All registered vehicles.",
@@ -2734,10 +2717,6 @@
     });
   }
 
-
-  /* =======================================================================
-     21. TRIP MANAGEMENT (ADMIN)
-     ======================================================================= */
   Router.register("admin-trips", {
     title: "Trips",
     subtitle: "All trips on the platform.",
@@ -2929,55 +2908,7 @@
 
 
   /* =======================================================================
-     23–25. TICKETING / SEAT / WAITLIST
-     ======================================================================= */
-  async function runAutomaticSeatRelease() {
-    if (!supabase) return 0;
-    const cutoff = new Date(Date.now() - TRANSITCARE_CONFIG.BOARDING_WINDOW_MINUTES * 60000).toISOString();
-    const { data: stale } = await supabase.from("bookings")
-      .select("id, trip_id, seat_number, passenger_id")
-      .eq("status", "reserved").lt("created_at", cutoff);
-    if (!stale || stale.length === 0) return 0;
-
-    let released = 0;
-    for (const booking of stale) {
-      const { error } = await supabase.from("bookings").update({ status: "no_show" }).eq("id", booking.id);
-      if (!error) {
-        released++;
-        await Data.logAudit("seat_auto_released", "booking", booking.id, { seat: booking.seat_number });
-        await Notifications.create({
-          recipient_id: booking.passenger_id,
-          title: "Seat released",
-          message: "Seat " + booking.seat_number + " was released because you did not board in time.",
-          type: "seat_released",
-          related_entity: booking.id
-        });
-      }
-    }
-    return released;
-  }
-
-  const Waitlist = {
-    async join(tripId) {
-      if (!supabase || !AppState.authUser) return null;
-      const { data, error } = await supabase.from("waitlist").insert({
-        passenger_id: AppState.authUser.id, trip_id: tripId, status: "waiting"
-      }).select().single();
-      if (error) throw error;
-      return data;
-    },
-    async listForTrip(tripId) {
-      if (!supabase) return [];
-      const { data, error } = await supabase.from("waitlist").select("*")
-        .eq("trip_id", tripId).eq("status", "waiting").order("created_at", { ascending: true });
-      if (error) throw error;
-      return data || [];
-    }
-  };
-
-
-  /* =======================================================================
-     26. NOTIFICATIONS
+     23. NOTIFICATIONS
      ======================================================================= */
   const Notifications = {
     async fetch() {
@@ -3051,103 +2982,7 @@
 
 
   /* =======================================================================
-     27. FEEDBACK
-     ======================================================================= */
-  Router.register("feedback", {
-    title: "Leave feedback",
-    subtitle: "Help improve TransitCare.",
-    render: async function (container) {
-      try {
-        const { data: bookings } = await supabase.from("bookings")
-          .select("*, trips(*, routes(origin, destination))")
-          .eq("passenger_id", AppState.authUser.id).eq("status", "boarded")
-          .order("created_at", { ascending: false }).limit(1);
-
-        if (!bookings || bookings.length === 0) {
-          renderEmpty(container, { icon: "⭐", title: "No eligible trips", message: "You can leave feedback after completing a trip." });
-          return;
-        }
-
-        const booking = bookings[0];
-        const trip = booking.trips || {};
-        const route = trip.routes || {};
-
-        container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
-          '<div class="card__body"><p class="text-muted mb-4">' +
-            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
-            '<form id="feedback-form">' +
-              '<div class="field"><label>Overall rating</label>' +
-                '<div class="rating-input">' +
-                  [5, 4, 3, 2, 1].map(function (n) {
-                    return '<input type="radio" name="rating" id="rating-' + n + '" value="' + n + '" />' +
-                      '<label for="rating-' + n + '" aria-label="' + n + ' stars">★</label>';
-                  }).join("") +
-                '</div></div>' +
-              '<div class="field"><label for="feedback-comment">Comments</label>' +
-                '<textarea id="feedback-comment" placeholder="Share your experience…"></textarea></div>' +
-              '<div class="form-actions"><button type="submit" class="button button--primary">Submit feedback</button></div>' +
-            '</form></div></section>';
-
-        document.getElementById("feedback-form").addEventListener("submit", async function (event) {
-          event.preventDefault();
-          const ratingEl = document.querySelector('input[name="rating"]:checked');
-          if (!ratingEl) { Toast.warning("Please select a rating"); return; }
-          const rating = Number(ratingEl.value);
-          const comment = document.getElementById("feedback-comment").value.trim();
-
-          Loader.show("Submitting…");
-          try {
-            const { error } = await supabase.from("feedback").insert({
-              passenger_id: AppState.authUser.id,
-              trip_id: trip.id,
-              overall_rating: rating,
-              comment: comment || null
-            });
-            if (error) throw error;
-            Toast.success("Thank you for your feedback");
-            Router.go("home");
-          } catch (err) { Toast.error("Unable to submit feedback", err.message); }
-          finally { Loader.hide(); }
-        });
-      } catch (err) { renderError(container, err.message); }
-    }
-  });
-
-
-  /* =======================================================================
-     28. AUDIT LOGS
-     ======================================================================= */
-  Router.register("admin-audit", {
-    title: "Audit log",
-    subtitle: "Recent administrative activity.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body" id="audit-full-list"></div></div>';
-      const list = document.getElementById("audit-full-list");
-      renderLoading(list, "Loading audit log…");
-
-      try {
-        const { data, error } = await supabase.from("audit_logs").select("*")
-          .order("created_at", { ascending: false }).limit(200);
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "📝", title: "No audit entries", message: "Administrative actions will be logged here." });
-          return;
-        }
-        list.innerHTML = data.map(function (log) {
-          return '<div class="audit-entry">' +
-            '<span class="audit-entry__time">' + escapeHtml(formatDateTime(log.created_at)) + '</span>' +
-            '<span class="audit-entry__text">' + escapeHtml(log.action || "action") +
-              (log.entity_type ? ' · ' + escapeHtml(log.entity_type) : "") +
-              (log.entity_id ? ' (' + escapeHtml(String(log.entity_id).slice(0, 8)) + ')' : "") + '</span></div>';
-        }).join("");
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
-
-  /* =======================================================================
-     29. ERROR HANDLING
+     24. ERROR HANDLING & GLOBAL RESILIENCE
      ======================================================================= */
   window.addEventListener("error", function (event) {
     console.error("[TransitCare] Unhandled error:", event.error || event.message);
@@ -3162,19 +2997,24 @@
      UI HELPERS
      ======================================================================= */
   function showAuthScreen() {
-    document.getElementById("auth-screen").classList.remove("is-hidden");
-    document.getElementById("app-shell").classList.add("is-hidden");
+    const authScreen = document.getElementById("auth-screen");
+    const appShell = document.getElementById("app-shell");
+    if (authScreen) authScreen.classList.remove("is-hidden");
+    if (appShell) appShell.classList.add("is-hidden");
     document.body.style.overflow = "";
   }
 
   function showAppShell() {
-    document.getElementById("auth-screen").classList.add("is-hidden");
-    document.getElementById("app-shell").classList.remove("is-hidden");
+    const authScreen = document.getElementById("auth-screen");
+    const appShell = document.getElementById("app-shell");
+    if (authScreen) authScreen.classList.add("is-hidden");
+    if (appShell) appShell.classList.remove("is-hidden");
   }
 
   function updateHeaderUser() {
     const profile = AppState.profile || {};
-    const name = profile.full_name || "User";
+    const meta = (AppState.authUser && AppState.authUser.user_metadata) || {};
+    const name = profile.full_name || meta.full_name || "Commuter";
     setText("header-user-name", name);
     setText("header-user-role", humanizeStatus(AppState.role || ""));
     const avatar = document.getElementById("header-avatar");
@@ -3199,10 +3039,6 @@
     else openSidebar();
   }
 
-
-  /* =======================================================================
-     VERIFICATION NOTICE HELPER
-     ======================================================================= */
   function showVerificationNotice(email, role) {
     const message = document.getElementById("auth-message");
     if (!message) return;
@@ -3305,7 +3141,6 @@
       });
     });
 
-    /* ----- Sign in (with timeout recovery) ----- */
     if (signinForm) {
       signinForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3327,13 +3162,8 @@
         try {
           await Auth.signIn(email, password);
         } catch (err) {
-          /* Timeout recovery — clear storage and reload, avoiding the
-             infinite "Signing in…" state on second sign-in. */
           if (err && err.code === "SIGNIN_TIMEOUT") {
-            setFormMessage("auth-message", "warning",
-              "Sign-in is taking too long. Reloading to try again…");
-            clearSupabaseStorage();
-            setTimeout(function () { window.location.reload(); }, 1200);
+            setFormMessage("auth-message", "warning", "Sign-in is taking longer than expected. Please retry.");
             return;
           }
 
@@ -3370,7 +3200,6 @@
       });
     }
 
-    /* ----- Sign up ----- */
     if (signupForm) {
       signupForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3421,7 +3250,6 @@
       });
     }
 
-    /* ----- Forgot password ----- */
     const forgotButton = document.getElementById("forgot-password-button");
     if (forgotButton) forgotButton.addEventListener("click", function () { showAuthForm("forgot"); });
 
@@ -3454,7 +3282,6 @@
       });
     }
 
-    /* ----- Reset password ----- */
     if (resetForm) {
       resetForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3489,34 +3316,29 @@
 
 
   /* =======================================================================
-     30. BOOTSTRAP
+     25. SIGNED-IN SESSION HANDLER
      ======================================================================= */
-  let isSigningIn = false;
-
   async function handleSignedIn(session) {
     if (!session || !session.user) {
       showAuthScreen();
       return;
     }
 
-    // Prevent duplicate parallel executions on page reload
-    if (isSigningIn) return;
-    isSigningIn = true;
+    // 1. Immediately reveal the main app so the user never sees the login screen on reload
+    showAppShell();
+
+    if (AppState.isSigningIn) return;
+    AppState.isSigningIn = true;
 
     try {
-      // If user is already loaded and in state, just ensure the app shell is visible
-      if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
-        showAppShell();
-        return;
-      }
-
       AppState.authUser = session.user;
 
+      // 2. Fetch or restore profile
       let profile = null;
       try {
         profile = await Profile.fetch(session.user.id);
       } catch (err) {
-        console.warn("[TransitCare] Profile fetch failed:", err);
+        console.warn("[TransitCare] Profile fetch error:", err);
       }
 
       if (!profile && session.user.user_metadata) {
@@ -3532,42 +3354,44 @@
           });
           profile = await Profile.fetch(session.user.id);
         } catch (err) {
-          console.warn("[TransitCare] Auto profile insert failed:", err);
+          console.warn("[TransitCare] Profile auto-creation skipped:", err);
         }
       }
 
       AppState.profile = profile;
       AppState.role = Profile.resolveRole(profile, session.user);
 
-      showAppShell();
+      // 3. Render authenticated UI
       updateHeaderUser();
       renderNavigation();
 
       try {
         await refreshNotificationBadge();
         subscribeToNotifications();
-      } catch (err) {
-        console.warn("[TransitCare] Notification subscription failed:", err);
+      } catch (e) {
+        console.warn("[TransitCare] Notification setup skipped:", e);
       }
 
+      // 4. Route to default view if not already navigated
       const defaultView =
         AppState.role === "admin" ? "admin-dashboard" :
         AppState.role === "operator" ? "operator-dashboard" :
         AppState.role === "driver" ? "driver-dashboard" : "home";
 
-      // If user reloaded on a specific screen, default back to their role's main screen
-      Router.go(defaultView);
-    } catch (fatalError) {
-      console.error("[TransitCare] Fatal sign-in bootstrap error:", fatalError);
-      // Fallback: Show app shell with minimal metadata rather than booting user out
-      showAppShell();
-      updateHeaderUser();
-      renderNavigation();
+      if (!AppState.currentView || AppState.currentView === "home") {
+        Router.go(defaultView);
+      }
+    } catch (err) {
+      console.error("[TransitCare] Error during handleSignedIn:", err);
     } finally {
-      isSigningIn = false;
+      AppState.isSigningIn = false;
     }
   }
 
+
+  /* =======================================================================
+     26. GLOBAL UI WIRING
+     ======================================================================= */
   function wireGlobalUi() {
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.addEventListener("click", toggleSidebar);
@@ -3577,6 +3401,18 @@
       shell.addEventListener("click", function (event) {
         if (!shell.classList.contains("sidebar-open")) return;
         if (event.target === shell) closeSidebar();
+      });
+    }
+
+    const brand = document.querySelector(".app-header__brand");
+    if (brand) {
+      brand.addEventListener("click", function (e) {
+        e.preventDefault();
+        const defaultView =
+          AppState.role === "admin" ? "admin-dashboard" :
+          AppState.role === "operator" ? "operator-dashboard" :
+          AppState.role === "driver" ? "driver-dashboard" : "home";
+        Router.go(defaultView);
       });
     }
 
@@ -3595,6 +3431,24 @@
       });
     }
 
+    const dropdownProfile = document.querySelector('#user-menu-dropdown [data-view="profile"]');
+    if (dropdownProfile) {
+      dropdownProfile.addEventListener("click", function (e) {
+        e.preventDefault();
+        Router.go("profile");
+        dropdown.classList.add("is-hidden");
+      });
+    }
+
+    const dropdownNotif = document.querySelector('#user-menu-dropdown [data-view="notifications"]');
+    if (dropdownNotif) {
+      dropdownNotif.addEventListener("click", function (e) {
+        e.preventDefault();
+        Router.go("notifications");
+        dropdown.classList.add("is-hidden");
+      });
+    }
+
     const signoutButton = document.getElementById("signout-button");
     if (signoutButton) signoutButton.addEventListener("click", function () { Auth.signOut(); });
 
@@ -3604,9 +3458,12 @@
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
+
+  /* =======================================================================
+     27. BOOTSTRAP
+     ======================================================================= */
   async function bootstrap() {
     initSupabase();
-
     bindAuthForms();
     wireGlobalUi();
 
@@ -3624,30 +3481,35 @@
       return;
     }
 
-    // In Supabase JS v2, onAuthStateChange fires INITIAL_SESSION automatically on load
-    supabase.auth.onAuthStateChange(async function (event, session) {
-      console.log("[TransitCare] Auth event:", event, session ? "(has session)" : "(no session)");
-
-      if (event === "PASSWORD_RECOVERY") {
+    // 1. Immediately read existing session from localStorage on startup
+    try {
+      const { data: { session }, error } = await supabase.auth.getSession();
+      if (!error && session && session.user) {
+        await handleSignedIn(session);
+      } else {
         showAuthScreen();
-        document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
-        const resetForm = document.getElementById("reset-form");
-        if (resetForm) resetForm.classList.remove("is-hidden");
-        return;
       }
+    } catch (err) {
+      console.warn("[TransitCare] getSession failed on bootstrap:", err);
+      showAuthScreen();
+    }
+
+    // 2. Listen for future auth changes (login, logout, token refresh)
+    supabase.auth.onAuthStateChange(async function (event, session) {
+      console.log("[TransitCare] Auth event:", event);
 
       if (event === "SIGNED_OUT") {
         resetState();
         showAuthScreen();
-        return;
-      }
-
-      if (session && session.user) {
-        await handleSignedIn(session);
-      } else if (event === "INITIAL_SESSION" && !session) {
-        // App opened with no stored session in localStorage
-        resetState();
+      } else if (event === "SIGNED_IN") {
+        if (session && session.user) {
+          await handleSignedIn(session);
+        }
+      } else if (event === "PASSWORD_RECOVERY") {
         showAuthScreen();
+        document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
+        const resetForm = document.getElementById("reset-form");
+        if (resetForm) resetForm.classList.remove("is-hidden");
       }
     });
   }
