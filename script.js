@@ -70,7 +70,7 @@
      ======================================================================= */
   let supabase = null;
 
-  function initSupabase() {
+    function initSupabase() {
     if (!IS_SUPABASE_CONFIGURED) {
       console.warn("[TransitCare] Supabase is not configured.");
       return null;
@@ -87,8 +87,7 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true,
-            lock: function (_name, acquire) { return acquire(); }
+            detectSessionInUrl: true
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
