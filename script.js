@@ -100,23 +100,18 @@
             autoRefreshToken: true,
             detectSessionInUrl: true,
 
-            /* Defensive lock override: finds the callback wherever
-               Supabase puts it, calls it, and never leaves the promise
-               pending. Fixes hangs on mobile Safari and in-app webviews. */
-                        lock: function (name, acquire) {
-              /* Use the native Web Locks API when available so session
-                 restore from localStorage works correctly. Fall back to
-                 calling acquire() directly if it hangs (mobile Safari,
-                 in-app webviews) so the UI never freezes. */
+            /* Use the native Web Locks API so session restore works,
+               but with a 4-second timeout that falls back to calling
+               acquire() directly. This prevents hangs on mobile Safari
+               and in-app webviews. */
+            lock: function (name, acquire) {
               if (typeof navigator !== "undefined" &&
                   navigator.locks &&
                   typeof navigator.locks.request === "function") {
                 return Promise.race([
                   navigator.locks.request(name, { mode: "exclusive" }, acquire),
                   new Promise(function (_, reject) {
-                    setTimeout(function () {
-                      reject(new Error("Lock timeout"));
-                    }, 4000);
+                    setTimeout(function () { reject(new Error("Lock timeout")); }, 4000);
                   })
                 ]).catch(function (err) {
                   console.warn("[TransitCare] Lock fallback:", err.message);
@@ -609,8 +604,6 @@
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
 
-      /* Race the sign-in against a timeout so a stuck Web Lock can
-         never leave the user staring at "Signing in…" forever. */
       const signInPromise = supabase.auth.signInWithPassword({ email, password })
         .then(function (result) {
           if (result.error) throw result.error;
@@ -653,9 +646,7 @@
     },
 
     async signOut() {
-      /* Close realtime first so the old token is not kept alive. */
       stopAllRealtime();
-
       if (supabase) {
         try {
           await Promise.race([
@@ -666,10 +657,7 @@
           console.warn("[TransitCare] Sign-out error (ignored):", err);
         }
       }
-
-      /* Belt and braces: clear any leftover sb- keys. */
       clearSupabaseStorage();
-
       resetState();
       showAuthScreen();
     },
@@ -996,17 +984,15 @@
       const firstName = String(name).split(" ")[0];
 
       container.innerHTML =
-        '<section class="card">' +
-          '<div class="card__body">' +
-            '<p class="eyebrow">Eko TransitCare</p>' +
-            '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
-            '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
-            '<div class="button-group mt-4">' +
-              '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
-              '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
-            '</div>' +
+        '<section class="card"><div class="card__body">' +
+          '<p class="eyebrow">Eko TransitCare</p>' +
+          '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(firstName) + ' 👋</h2>' +
+          '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
+          '<div class="button-group mt-4">' +
+            '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
+            '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
           '</div>' +
-        '</section>' +
+        '</div></section>' +
         '<section class="card"><div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
         '<div class="card__body" id="home-upcoming"></div></section>' +
         '<section class="card"><div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
@@ -2314,9 +2300,6 @@
     }
   });
 
-  /* -----------------------------------------------------------------------
-     Driver approval — includes automatic vehicle assignment through the UI.
-     ----------------------------------------------------------------------- */
   Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
@@ -2386,8 +2369,6 @@
     }
   });
 
-  /* Vehicle assignment modal — admin assigns a vehicle to a driver
-     without touching SQL. */
   function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
     const currentVehicle = vehicleByDriver[driver.id];
 
@@ -3186,14 +3167,18 @@
      UI HELPERS
      ======================================================================= */
   function showAuthScreen() {
-    document.getElementById("auth-screen").classList.remove("is-hidden");
-    document.getElementById("app-shell").classList.add("is-hidden");
+    const authScreen = document.getElementById("auth-screen");
+    const appShell = document.getElementById("app-shell");
+    if (authScreen) authScreen.classList.remove("is-hidden");
+    if (appShell) appShell.classList.add("is-hidden");
     document.body.style.overflow = "";
   }
 
   function showAppShell() {
-    document.getElementById("auth-screen").classList.add("is-hidden");
-    document.getElementById("app-shell").classList.remove("is-hidden");
+    const authScreen = document.getElementById("auth-screen");
+    const appShell = document.getElementById("app-shell");
+    if (authScreen) authScreen.classList.add("is-hidden");
+    if (appShell) appShell.classList.remove("is-hidden");
   }
 
   function updateHeaderUser() {
@@ -3206,19 +3191,22 @@
   }
 
   function openSidebar() {
-    document.getElementById("app-shell").classList.add("sidebar-open");
+    const shell = document.getElementById("app-shell");
+    if (shell) shell.classList.add("sidebar-open");
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.setAttribute("aria-expanded", "true");
   }
 
   function closeSidebar() {
-    document.getElementById("app-shell").classList.remove("sidebar-open");
+    const shell = document.getElementById("app-shell");
+    if (shell) shell.classList.remove("sidebar-open");
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.setAttribute("aria-expanded", "false");
   }
 
   function toggleSidebar() {
     const shell = document.getElementById("app-shell");
+    if (!shell) return;
     if (shell.classList.contains("sidebar-open")) closeSidebar();
     else openSidebar();
   }
@@ -3351,8 +3339,6 @@
         try {
           await Auth.signIn(email, password);
         } catch (err) {
-          /* Timeout recovery — clear storage and reload, avoiding the
-             infinite "Signing in…" state on second sign-in. */
           if (err && err.code === "SIGNIN_TIMEOUT") {
             setFormMessage("auth-message", "warning",
               "Sign-in is taking too long. Reloading to try again…");
@@ -3513,7 +3499,7 @@
 
 
   /* =======================================================================
-     30. BOOTSTRAP
+     30. BOOTSTRAP — ROBUST SESSION RESTORE
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
@@ -3595,7 +3581,7 @@
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
-    async function bootstrap() {
+  async function bootstrap() {
     initSupabase();
 
     bindAuthForms();
@@ -3615,28 +3601,26 @@
       return;
     }
 
-    /* -----------------------------------------------------------------
-       Robust session restore.
+    /* --------------------------------------------------------------------
+       ROBUST SESSION RESTORE
 
-       Supabase fires INITIAL_SESSION on page load. On some browsers
-       it fires FIRST with a null session, THEN with the real session
-       loaded from localStorage. If we react to the first null, we log
-       the user out on every refresh.
+       Supabase fires INITIAL_SESSION on page load. On some browsers it
+       fires first with a null session BEFORE the localStorage session
+       is loaded. Reacting to the first null logs the user out on every
+       refresh, which is the bug we are fixing.
 
-       This version:
-         • Waits for the FIRST session-bearing event OR a timeout.
-         • Only shows the auth screen once we are sure there is no
-           session — either the event fired with null, or getSession
-           also returned null.
-         • Handles future SIGNED_IN / SIGNED_OUT events normally.
-       ----------------------------------------------------------------- */
+       Strategy:
+         • Ignore INITIAL_SESSION with null (wait for fallback).
+         • If INITIAL_SESSION carries a session, sign in immediately.
+         • After 1 second, ask getSession() directly as a fallback.
+         • Only show the login screen if BOTH paths return no session.
+       -------------------------------------------------------------------- */
 
-    let initialHandled = false;
-    let firstEventSeen = false;
+    let resolved = false;
 
-    function handleInitial(session) {
-      if (initialHandled) return;
-      initialHandled = true;
+    function resolveInitial(session) {
+      if (resolved) return;
+      resolved = true;
 
       if (session && session.user) {
         handleSignedIn(session).catch(function (err) {
@@ -3652,17 +3636,15 @@
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
       if (event === "INITIAL_SESSION") {
-        firstEventSeen = true;
         if (session && session.user) {
-          handleInitial(session);
+          resolveInitial(session);
         }
-        /* If null, don't do anything yet — wait for the fallback below.
-           Supabase may fire another event or getSession may still succeed. */
+        /* If null, do not resolve yet — wait for the fallback. */
         return;
       }
 
       if (event === "PASSWORD_RECOVERY") {
-        initialHandled = true;
+        resolved = true;
         showAuthScreen();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
@@ -3671,7 +3653,7 @@
       }
 
       if (event === "SIGNED_OUT") {
-        initialHandled = true;
+        resolved = true;
         resetState();
         showAuthScreen();
         return;
@@ -3681,17 +3663,15 @@
         if (session && session.user && !AppState.authUser) {
           await handleSignedIn(session);
         }
-        if (!initialHandled) initialHandled = true;
-        return;
+        if (!resolved) resolved = true;
       }
     });
 
-    /* Fallback: after 1500ms, if no session has been restored, ask
-       getSession() directly. This covers older supabase-js versions
-       that do not fire INITIAL_SESSION, and browsers where the event
-       is delayed. */
+    /* Fallback: 1 second after page load, ask getSession() directly.
+       This catches both older supabase-js versions that do not fire
+       INITIAL_SESSION and cases where the event is delayed. */
     setTimeout(async function () {
-      if (initialHandled) return;
+      if (resolved) return;
       try {
         const result = await Promise.race([
           supabase.auth.getSession(),
@@ -3702,12 +3682,18 @@
           })
         ]);
         const session = result && result.data ? result.data.session : null;
-        handleInitial(session);
+        resolveInitial(session);
       } catch (err) {
         console.warn("[TransitCare] Fallback getSession failed:", err);
-        handleInitial(null);
+        resolveInitial(null);
       }
-    }, 1500);
+    }, 1000);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootstrap);
+  } else {
+    bootstrap();
   }
 
 })();
