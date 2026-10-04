@@ -100,24 +100,7 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true,
-
-            /* Defensive lock override: finds the callback wherever
-               Supabase puts it, calls it, and never leaves the promise
-               pending. Fixes hangs on mobile Safari and in-app webviews. */
-            lock: function () {
-              try {
-                var args = Array.prototype.slice.call(arguments);
-                for (var i = 0; i < args.length; i++) {
-                  if (typeof args[i] === "function") {
-                    return Promise.resolve(args[i]());
-                  }
-                }
-              } catch (err) {
-                console.warn("[TransitCare] Lock acquire threw:", err);
-              }
-              return Promise.resolve(null);
-            }
+            detectSessionInUrl: true
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
@@ -3508,48 +3491,81 @@
   /* =======================================================================
      30. BOOTSTRAP
      ======================================================================= */
-  async function handleSignedIn(session) {
-    if (!session || !session.user) return;
+  let isSigningIn = false;
 
-    if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
+  async function handleSignedIn(session) {
+    if (!session || !session.user) {
+      showAuthScreen();
       return;
     }
 
-    AppState.authUser = session.user;
+    // Prevent duplicate parallel executions on page reload
+    if (isSigningIn) return;
+    isSigningIn = true;
 
-    let profile = await Profile.fetch(session.user.id);
+    try {
+      // If user is already loaded and in state, just ensure the app shell is visible
+      if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
+        showAppShell();
+        return;
+      }
 
-    if (!profile && session.user.user_metadata) {
-      const meta = session.user.user_metadata;
+      AppState.authUser = session.user;
+
+      let profile = null;
       try {
-        await supabase.from("profiles").insert({
-          id: session.user.id,
-          full_name: meta.full_name || session.user.email,
-          email: session.user.email,
-          phone: meta.phone || null,
-          role: meta.role || "passenger",
-          status: meta.role === "driver" ? "email_verified" : "active"
-        });
-      } catch (err) { console.warn("[TransitCare] Auto profile insert failed:", err); }
-      profile = await Profile.fetch(session.user.id);
+        profile = await Profile.fetch(session.user.id);
+      } catch (err) {
+        console.warn("[TransitCare] Profile fetch failed:", err);
+      }
+
+      if (!profile && session.user.user_metadata) {
+        const meta = session.user.user_metadata;
+        try {
+          await supabase.from("profiles").insert({
+            id: session.user.id,
+            full_name: meta.full_name || session.user.email,
+            email: session.user.email,
+            phone: meta.phone || null,
+            role: meta.role || "passenger",
+            status: meta.role === "driver" ? "email_verified" : "active"
+          });
+          profile = await Profile.fetch(session.user.id);
+        } catch (err) {
+          console.warn("[TransitCare] Auto profile insert failed:", err);
+        }
+      }
+
+      AppState.profile = profile;
+      AppState.role = Profile.resolveRole(profile, session.user);
+
+      showAppShell();
+      updateHeaderUser();
+      renderNavigation();
+
+      try {
+        await refreshNotificationBadge();
+        subscribeToNotifications();
+      } catch (err) {
+        console.warn("[TransitCare] Notification subscription failed:", err);
+      }
+
+      const defaultView =
+        AppState.role === "admin" ? "admin-dashboard" :
+        AppState.role === "operator" ? "operator-dashboard" :
+        AppState.role === "driver" ? "driver-dashboard" : "home";
+
+      // If user reloaded on a specific screen, default back to their role's main screen
+      Router.go(defaultView);
+    } catch (fatalError) {
+      console.error("[TransitCare] Fatal sign-in bootstrap error:", fatalError);
+      // Fallback: Show app shell with minimal metadata rather than booting user out
+      showAppShell();
+      updateHeaderUser();
+      renderNavigation();
+    } finally {
+      isSigningIn = false;
     }
-
-    AppState.profile = profile;
-    AppState.role = Profile.resolveRole(profile, session.user);
-
-    showAppShell();
-    updateHeaderUser();
-    renderNavigation();
-
-    await refreshNotificationBadge();
-    subscribeToNotifications();
-
-    const defaultView =
-      AppState.role === "admin" ? "admin-dashboard" :
-      AppState.role === "operator" ? "operator-dashboard" :
-      AppState.role === "driver" ? "driver-dashboard" : "home";
-
-    Router.go(defaultView);
   }
 
   function wireGlobalUi() {
@@ -3608,50 +3624,32 @@
       return;
     }
 
-    let handled = false;
-
+    // In Supabase JS v2, onAuthStateChange fires INITIAL_SESSION automatically on load
     supabase.auth.onAuthStateChange(async function (event, session) {
-      console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
+      console.log("[TransitCare] Auth event:", event, session ? "(has session)" : "(no session)");
 
       if (event === "PASSWORD_RECOVERY") {
         showAuthScreen();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
         if (resetForm) resetForm.classList.remove("is-hidden");
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_OUT" || !session) {
+      if (event === "SIGNED_OUT") {
         resetState();
         showAuthScreen();
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" ||
-          event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        try {
-          await handleSignedIn(session);
-        } catch (err) {
-          console.warn("[TransitCare] handleSignedIn failed:", err);
-          showAuthScreen();
-        }
-        handled = true;
-      }
-    });
-
-    try {
-      const session = await Auth.getSession();
-      if (session) {
+      if (session && session.user) {
         await handleSignedIn(session);
-      } else if (!handled) {
+      } else if (event === "INITIAL_SESSION" && !session) {
+        // App opened with no stored session in localStorage
+        resetState();
         showAuthScreen();
       }
-    } catch (err) {
-      console.warn("[TransitCare] Initial session check failed:", err);
-      if (!handled) showAuthScreen();
-    }
+    });
   }
 
   if (document.readyState === "loading") {
