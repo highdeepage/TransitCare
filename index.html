@@ -13,11 +13,13 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
-<link rel="stylesheet" href="style.css?v=3" />
+<link rel="stylesheet" href="style.css?v=4" />
+
 <!-- =========================================================
-     INLINE BUS ANIMATION
-     Kept inside index.html on purpose so it can never be
-     served from a stale CSS cache.
+     INLINE STYLES
+     Kept inside index.html on purpose so they can never be
+     served from a stale CSS cache. Includes the animated
+     Lagos danfo bus that travels along the hero divider.
      ========================================================= -->
 <style>
   /* ---- Divider container ---- */
@@ -38,11 +40,7 @@
     transform: translateY(-50%);
     filter: drop-shadow(0 2px 4px rgba(26, 23, 48, 0.25));
 
-    /* =====================================================
-       SPEED CONTROL
-       Lower number = faster. Higher number = slower.
-       9s = original, 7s = faster, 5s = quick
-       ===================================================== */
+    /* SPEED: lower number = faster. 7s is the current setting. */
     animation: transitcare-bus-run 10s linear infinite;
 
     will-change: left, opacity;
@@ -66,7 +64,7 @@
 <body>
 
 <!-- =====================================================
-     DECORATIVE BACKGROUND (soft, light, behind everything)
+     BACKGROUND CANVAS
      ===================================================== -->
 <div class="bg-canvas" aria-hidden="true">
   <span class="bg-canvas__blob bg-canvas__blob--1"></span>
@@ -107,7 +105,7 @@
 
 
 <!-- =====================================================
-     AUTH SCREEN — visible by default (no is-hidden)
+     AUTH SCREEN
      ===================================================== -->
 <div id="auth-screen" class="auth-screen">
 
@@ -124,36 +122,38 @@
           <h1 class="hero-header__name">Eko TransitCare</h1>
         </div>
 
-            <div class="hero-header__divider" role="presentation">
+        <div class="hero-header__divider" role="presentation">
           <span class="hero-header__divider-line"></span>
           <span class="hero-header__divider-dot"></span>
           <span class="hero-header__divider-line"></span>
 
-          <!-- Mini Lagos danfo bus — pure inline SVG, no external request -->
+          <!-- Mini Lagos danfo bus — inline SVG -->
           <svg class="hero-header__divider-bus"
                width="26" height="15" viewBox="0 0 26 15"
                xmlns="http://www.w3.org/2000/svg"
                aria-hidden="true">
-            <!-- body -->
             <rect x="1" y="2.5" width="24" height="9" rx="1.6"
                   fill="#FFC800" stroke="#1A1730" stroke-width="1"/>
-            <!-- windshield -->
             <rect x="20.5" y="4" width="3.2" height="3.5" rx="0.4" fill="#1A1730"/>
-            <!-- windows -->
             <rect x="15.4" y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
             <rect x="10.4" y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
             <rect x="5.4"  y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
-            <!-- signature black stripe (danfo) -->
             <rect x="1" y="8.5" width="24" height="1.2" fill="#1A1730"/>
-            <!-- headlight -->
             <rect x="23.5" y="10" width="1.3" height="0.9"
                   fill="#FFF7CC" stroke="#1A1730" stroke-width="0.3"/>
-            <!-- wheels -->
             <circle cx="6.5"  cy="12" r="2.2" fill="#1A1730"/>
             <circle cx="6.5"  cy="12" r="0.8" fill="#94A3B8"/>
             <circle cx="19.5" cy="12" r="2.2" fill="#1A1730"/>
             <circle cx="19.5" cy="12" r="0.8" fill="#94A3B8"/>
           </svg>
+        </div>
+
+        <div class="hero-header__body">
+          <p class="hero-header__lede">
+            A smart companion for Lagos commuters. See the bus, the terminal, the route,
+            the departure time, the fare and the seats — before you leave home.
+          </p>
+          <p class="hero-header__tagline">Know Your Ride Before You Leave.</p>
         </div>
       </header>
 
@@ -197,7 +197,7 @@
   </section>
 
 
-  <!-- ---------- RIGHT: AUTH CARD (thick border) ---------- -->
+  <!-- ---------- RIGHT: AUTH CARD ---------- -->
   <section class="auth-panel" aria-label="Account access">
     <div class="auth-panel__inner">
 
@@ -492,7 +492,7 @@
 
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-<script src="script.js?v=3"></script>
+<script src="script.js?v=4"></script>
 
 </body>
 </html>
