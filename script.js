@@ -9,8 +9,8 @@
      01. CONFIGURATION
      ======================================================================= */
   const TRANSITCARE_CONFIG = {
-    SUPABASE_URL: "https://YOUR-PROJECT-REF.supabase.co",
-    SUPABASE_ANON_KEY: "YOUR-PUBLIC-ANON-KEY",
+    SUPABASE_URL: "https://wjxldmgnglrrthzkzots.supabase.co",
+    SUPABASE_ANON_KEY: "sb_publishable_Z4EiH6YUo-ThIDN-mKQYOg_u-JjPbD3",
     APP_VERSION: "1.0.0",
     GPS_UPDATE_INTERVAL_MS: 12000,
     GPS_STALE_THRESHOLD_MS: 60000,
