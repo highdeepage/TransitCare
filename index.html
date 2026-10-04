@@ -35,28 +35,24 @@
     height: 15px;
     z-index: 2;
     pointer-events: none;
+    transform: translateY(-50%);
     filter: drop-shadow(0 2px 4px rgba(26, 23, 48, 0.25));
-    animation: transitcare-bus-run 9s linear infinite;
-    will-change: transform, opacity;
+
+    /* =====================================================
+       SPEED CONTROL
+       Lower number = faster. Higher number = slower.
+       9s = original, 7s = faster, 5s = quick
+       ===================================================== */
+    animation: transitcare-bus-run 10s linear infinite;
+
+    will-change: left, opacity;
   }
 
   @keyframes transitcare-bus-run {
-    0% {
-      transform: translate(-30px, -50%);
-      opacity: 0;
-    }
-    6% {
-      transform: translate(-30px, -50%);
-      opacity: 1;
-    }
-    94% {
-      transform: translate(calc(100% + 30px), -50%);
-      opacity: 1;
-    }
-    100% {
-      transform: translate(calc(100% + 30px), -50%);
-      opacity: 0;
-    }
+    0%   { left: -32px;             opacity: 0; }
+    6%   { left: -32px;             opacity: 1; }
+    94%  { left: calc(100% + 8px);  opacity: 1; }
+    100% { left: calc(100% + 8px);  opacity: 0; }
   }
 
   @media (prefers-reduced-motion: reduce) {
