@@ -20,17 +20,10 @@
     GPS_UPDATE_INTERVAL_MS: 12000,
     GPS_STALE_THRESHOLD_MS: 60000,
     BOARDING_WINDOW_MINUTES: 10,
-    WAITLIST_OFFER_MINUTES: 5,
-    RESCHEDULE_CUTOFF_MINUTES: 15,
-    SIGNIN_TIMEOUT_MS: 10000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
-
-  const IS_SUPABASE_CONFIGURED =
-    !!TRANSITCARE_CONFIG.SUPABASE_URL &&
-    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY;
 
 
   /* =======================================================================
@@ -78,11 +71,12 @@
 
   /* =======================================================================
      03. SUPABASE INITIALIZATION
+     Simple lock override — the version that works.
      ======================================================================= */
   let supabase = null;
 
   function initSupabase() {
-    if (!IS_SUPABASE_CONFIGURED) {
+    if (!TRANSITCARE_CONFIG.SUPABASE_URL || !TRANSITCARE_CONFIG.SUPABASE_ANON_KEY) {
       console.warn("[TransitCare] Supabase is not configured.");
       return null;
     }
@@ -99,22 +93,8 @@
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: true,
-
-            /* Defensive lock override: finds the callback wherever
-               Supabase puts it, calls it, and never leaves the promise
-               pending. Fixes hangs on mobile Safari and in-app webviews. */
-            lock: function () {
-              try {
-                var args = Array.prototype.slice.call(arguments);
-                for (var i = 0; i < args.length; i++) {
-                  if (typeof args[i] === "function") {
-                    return Promise.resolve(args[i]());
-                  }
-                }
-              } catch (err) {
-                console.warn("[TransitCare] Lock acquire threw:", err);
-              }
-              return Promise.resolve(null);
+            lock: function (_name, acquire) {
+              return acquire();
             }
           },
           realtime: { params: { eventsPerSecond: 5 } }
@@ -243,16 +223,6 @@
   }
 
   function nowIso() { return new Date().toISOString(); }
-
-  function clearSupabaseStorage() {
-    try {
-      Object.keys(localStorage).forEach(function (key) {
-        if (key.indexOf("sb-") === 0 || key.indexOf("supabase") === 0) {
-          localStorage.removeItem(key);
-        }
-      });
-    } catch (e) { /* ignore */ }
-  }
 
 
   /* =======================================================================
@@ -599,24 +569,9 @@
 
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
-
-      /* Race the sign-in against a timeout so a stuck Web Lock can
-         never leave the user staring at "Signing in…" forever. */
-      const signInPromise = supabase.auth.signInWithPassword({ email, password })
-        .then(function (result) {
-          if (result.error) throw result.error;
-          return result.data;
-        });
-
-      const timeoutPromise = new Promise(function (_, reject) {
-        setTimeout(function () {
-          const err = new Error("Sign-in is taking too long.");
-          err.code = "SIGNIN_TIMEOUT";
-          reject(err);
-        }, TRANSITCARE_CONFIG.SIGNIN_TIMEOUT_MS);
-      });
-
-      return Promise.race([signInPromise, timeoutPromise]);
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      return data;
     },
 
     async resendVerification(email) {
@@ -644,23 +599,10 @@
     },
 
     async signOut() {
-      /* Close realtime first so the old token is not kept alive. */
       stopAllRealtime();
-
       if (supabase) {
-        try {
-          await Promise.race([
-            supabase.auth.signOut(),
-            new Promise(function (resolve) { setTimeout(resolve, 3000); })
-          ]);
-        } catch (err) {
-          console.warn("[TransitCare] Sign-out error (ignored):", err);
-        }
+        try { await supabase.auth.signOut(); } catch (err) { console.warn(err); }
       }
-
-      /* Belt and braces: clear any leftover sb- keys. */
-      clearSupabaseStorage();
-
       resetState();
       showAuthScreen();
     },
@@ -2305,9 +2247,6 @@
     }
   });
 
-  /* -----------------------------------------------------------------------
-     Driver approval — includes automatic vehicle assignment through the UI.
-     ----------------------------------------------------------------------- */
   Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
@@ -2377,8 +2316,6 @@
     }
   });
 
-  /* Vehicle assignment modal — admin assigns a vehicle to a driver
-     without touching SQL. */
   function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
     const currentVehicle = vehicleByDriver[driver.id];
 
@@ -2944,55 +2881,7 @@
 
 
   /* =======================================================================
-     23–25. TICKETING / SEAT / WAITLIST
-     ======================================================================= */
-  async function runAutomaticSeatRelease() {
-    if (!supabase) return 0;
-    const cutoff = new Date(Date.now() - TRANSITCARE_CONFIG.BOARDING_WINDOW_MINUTES * 60000).toISOString();
-    const { data: stale } = await supabase.from("bookings")
-      .select("id, trip_id, seat_number, passenger_id")
-      .eq("status", "reserved").lt("created_at", cutoff);
-    if (!stale || stale.length === 0) return 0;
-
-    let released = 0;
-    for (const booking of stale) {
-      const { error } = await supabase.from("bookings").update({ status: "no_show" }).eq("id", booking.id);
-      if (!error) {
-        released++;
-        await Data.logAudit("seat_auto_released", "booking", booking.id, { seat: booking.seat_number });
-        await Notifications.create({
-          recipient_id: booking.passenger_id,
-          title: "Seat released",
-          message: "Seat " + booking.seat_number + " was released because you did not board in time.",
-          type: "seat_released",
-          related_entity: booking.id
-        });
-      }
-    }
-    return released;
-  }
-
-  const Waitlist = {
-    async join(tripId) {
-      if (!supabase || !AppState.authUser) return null;
-      const { data, error } = await supabase.from("waitlist").insert({
-        passenger_id: AppState.authUser.id, trip_id: tripId, status: "waiting"
-      }).select().single();
-      if (error) throw error;
-      return data;
-    },
-    async listForTrip(tripId) {
-      if (!supabase) return [];
-      const { data, error } = await supabase.from("waitlist").select("*")
-        .eq("trip_id", tripId).eq("status", "waiting").order("created_at", { ascending: true });
-      if (error) throw error;
-      return data || [];
-    }
-  };
-
-
-  /* =======================================================================
-     26. NOTIFICATIONS
+     23. NOTIFICATIONS
      ======================================================================= */
   const Notifications = {
     async fetch() {
@@ -3063,114 +2952,6 @@
   function stopAllRealtime() {
     Object.keys(AppState.channels).forEach(function (key) { stopRealtimeChannel(key); });
   }
-
-
-  /* =======================================================================
-     27. FEEDBACK
-     ======================================================================= */
-  Router.register("feedback", {
-    title: "Leave feedback",
-    subtitle: "Help improve TransitCare.",
-    render: async function (container) {
-      try {
-        const { data: bookings } = await supabase.from("bookings")
-          .select("*, trips(*, routes(origin, destination))")
-          .eq("passenger_id", AppState.authUser.id).eq("status", "boarded")
-          .order("created_at", { ascending: false }).limit(1);
-
-        if (!bookings || bookings.length === 0) {
-          renderEmpty(container, { icon: "⭐", title: "No eligible trips", message: "You can leave feedback after completing a trip." });
-          return;
-        }
-
-        const booking = bookings[0];
-        const trip = booking.trips || {};
-        const route = trip.routes || {};
-
-        container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
-          '<div class="card__body"><p class="text-muted mb-4">' +
-            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
-            '<form id="feedback-form">' +
-              '<div class="field"><label>Overall rating</label>' +
-                '<div class="rating-input">' +
-                  [5, 4, 3, 2, 1].map(function (n) {
-                    return '<input type="radio" name="rating" id="rating-' + n + '" value="' + n + '" />' +
-                      '<label for="rating-' + n + '" aria-label="' + n + ' stars">★</label>';
-                  }).join("") +
-                '</div></div>' +
-              '<div class="field"><label for="feedback-comment">Comments</label>' +
-                '<textarea id="feedback-comment" placeholder="Share your experience…"></textarea></div>' +
-              '<div class="form-actions"><button type="submit" class="button button--primary">Submit feedback</button></div>' +
-            '</form></div></section>';
-
-        document.getElementById("feedback-form").addEventListener("submit", async function (event) {
-          event.preventDefault();
-          const ratingEl = document.querySelector('input[name="rating"]:checked');
-          if (!ratingEl) { Toast.warning("Please select a rating"); return; }
-          const rating = Number(ratingEl.value);
-          const comment = document.getElementById("feedback-comment").value.trim();
-
-          Loader.show("Submitting…");
-          try {
-            const { error } = await supabase.from("feedback").insert({
-              passenger_id: AppState.authUser.id,
-              trip_id: trip.id,
-              overall_rating: rating,
-              comment: comment || null
-            });
-            if (error) throw error;
-            Toast.success("Thank you for your feedback");
-            Router.go("home");
-          } catch (err) { Toast.error("Unable to submit feedback", err.message); }
-          finally { Loader.hide(); }
-        });
-      } catch (err) { renderError(container, err.message); }
-    }
-  });
-
-
-  /* =======================================================================
-     28. AUDIT LOGS
-     ======================================================================= */
-  Router.register("admin-audit", {
-    title: "Audit log",
-    subtitle: "Recent administrative activity.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body" id="audit-full-list"></div></div>';
-      const list = document.getElementById("audit-full-list");
-      renderLoading(list, "Loading audit log…");
-
-      try {
-        const { data, error } = await supabase.from("audit_logs").select("*")
-          .order("created_at", { ascending: false }).limit(200);
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "📝", title: "No audit entries", message: "Administrative actions will be logged here." });
-          return;
-        }
-        list.innerHTML = data.map(function (log) {
-          return '<div class="audit-entry">' +
-            '<span class="audit-entry__time">' + escapeHtml(formatDateTime(log.created_at)) + '</span>' +
-            '<span class="audit-entry__text">' + escapeHtml(log.action || "action") +
-              (log.entity_type ? ' · ' + escapeHtml(log.entity_type) : "") +
-              (log.entity_id ? ' (' + escapeHtml(String(log.entity_id).slice(0, 8)) + ')' : "") + '</span></div>';
-        }).join("");
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
-
-  /* =======================================================================
-     29. ERROR HANDLING
-     ======================================================================= */
-  window.addEventListener("error", function (event) {
-    console.error("[TransitCare] Unhandled error:", event.error || event.message);
-  });
-
-  window.addEventListener("unhandledrejection", function (event) {
-    console.error("[TransitCare] Unhandled promise rejection:", event.reason);
-  });
 
 
   /* =======================================================================
@@ -3320,7 +3101,7 @@
       });
     });
 
-    /* ----- Sign in (with timeout recovery) ----- */
+    /* ----- Sign in ----- */
     if (signinForm) {
       signinForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3341,17 +3122,8 @@
 
         try {
           await Auth.signIn(email, password);
+          /* The onAuthStateChange listener will route us into the app */
         } catch (err) {
-          /* Timeout recovery — clear storage and reload, avoiding the
-             infinite "Signing in…" state on second sign-in. */
-          if (err && err.code === "SIGNIN_TIMEOUT") {
-            setFormMessage("auth-message", "warning",
-              "Sign-in is taking too long. Reloading to try again…");
-            clearSupabaseStorage();
-            setTimeout(function () { window.location.reload(); }, 1200);
-            return;
-          }
-
           const msg = (err && err.message) ? err.message : "";
           if (/email not confirmed|email not verified|confirm/i.test(msg)) {
             const container = document.getElementById("auth-message");
@@ -3504,7 +3276,17 @@
 
 
   /* =======================================================================
-     30. BOOTSTRAP
+     24. BOOTSTRAP
+     -----------------------------------------------------------------------
+     ROBUST SESSION RESTORE
+
+     The problem: Supabase fires INITIAL_SESSION with `null` on page load
+     BEFORE it has finished reading localStorage. If we react to that first
+     null, we log the user out on every refresh.
+
+     The fix: ignore the auth events during page load. Wait for the session
+     directly from getSession(), with retries. Only show the login screen
+     if getSession() also returns nothing after several attempts.
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
@@ -3606,8 +3388,11 @@
       return;
     }
 
-    let handled = false;
-
+    /* ---------------------------------------------------------------------
+       Step 1 — Register the auth listener for LIVE events only.
+       We deliberately do NOT react to INITIAL_SESSION here because it can
+       fire with `null` before localStorage has been read.
+       --------------------------------------------------------------------- */
     supabase.auth.onAuthStateChange(async function (event, session) {
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
@@ -3616,39 +3401,59 @@
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
         if (resetForm) resetForm.classList.remove("is-hidden");
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_OUT" || !session) {
+      if (event === "SIGNED_OUT") {
         resetState();
         showAuthScreen();
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" ||
-          event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        try {
-          await handleSignedIn(session);
-        } catch (err) {
-          console.warn("[TransitCare] handleSignedIn failed:", err);
-          showAuthScreen();
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
+        if (session && session.user) {
+          if (!AppState.authUser || AppState.authUser.id !== session.user.id) {
+            try {
+              await handleSignedIn(session);
+            } catch (err) {
+              console.error("[TransitCare] handleSignedIn failed:", err);
+            }
+          }
         }
-        handled = true;
+        return;
       }
     });
 
-    try {
-      const session = await Auth.getSession();
-      if (session) {
+    /* ---------------------------------------------------------------------
+       Step 2 — Wait for the session to be restorable.
+       We retry getSession() up to 5 times with 250ms gaps. On any device,
+       Supabase finishes reading localStorage well within that window.
+       --------------------------------------------------------------------- */
+    let session = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        session = await Auth.getSession();
+        if (session && session.user) break;
+      } catch (err) {
+        console.warn("[TransitCare] getSession attempt " + (attempt + 1) + " failed:", err);
+      }
+      if (attempt < 4) {
+        await new Promise(function (resolve) { setTimeout(resolve, 250); });
+      }
+    }
+
+    /* ---------------------------------------------------------------------
+       Step 3 — Take action based on the final result.
+       --------------------------------------------------------------------- */
+    if (session && session.user) {
+      try {
         await handleSignedIn(session);
-      } else if (!handled) {
+      } catch (err) {
+        console.error("[TransitCare] handleSignedIn failed:", err);
         showAuthScreen();
       }
-    } catch (err) {
-      console.warn("[TransitCare] Initial session check failed:", err);
-      if (!handled) showAuthScreen();
+    } else {
+      showAuthScreen();
     }
   }
 
