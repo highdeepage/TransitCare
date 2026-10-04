@@ -1,7 +1,41 @@
 /* =========================================================================
    EKO TRANSITCARE — APPLICATION LOGIC
-   Complete, self-contained, verified against the current index.html
+   "Know Your Ride Before You Leave."
+   Powered by Ajigbeda Girls Digital Queens
+   -------------------------------------------------------------------------
+   ORGANISATION
+   01. CONFIGURATION
+   02. EXTERNAL LIBRARY LOADER
+   03. SUPABASE INITIALIZATION
+   04. APPLICATION STATE
+   05. UTILITIES
+   06. TOAST SYSTEM
+   07. MODAL SYSTEM
+   08. GLOBAL LOADER
+   09. FORM VALIDATION
+   10. AUTHENTICATION
+   11. SESSION & PROFILE
+   12. ROLE-BASED NAVIGATION
+   13. VIEW ROUTER
+   14. PASSENGER VIEWS
+   15. DRIVER VIEWS
+   16. OPERATOR VIEWS
+   17. ADMIN VIEWS
+   18. TERMINAL MANAGEMENT
+   19. ROUTE MANAGEMENT
+   20. VEHICLE MANAGEMENT
+   21. TRIP MANAGEMENT
+   22. GPS TRACKING
+   23. TICKETING
+   24. SEAT MANAGEMENT
+   25. WAITLIST
+   26. NOTIFICATIONS
+   27. FEEDBACK
+   28. AUDIT LOGS
+   29. ERROR HANDLING
+   30. BOOTSTRAP
    ========================================================================= */
+
 (function () {
   "use strict";
 
@@ -11,38 +45,47 @@
   const TRANSITCARE_CONFIG = {
     SUPABASE_URL: "https://wjxldmgnglrrthzkzots.supabase.co",
     SUPABASE_ANON_KEY: "sb_publishable_Z4EiH6YUo-ThIDN-mKQYOg_u-JjPbD3",
+
+    APP_NAME: "Eko TransitCare",
     APP_VERSION: "1.0.0",
+
     GPS_UPDATE_INTERVAL_MS: 12000,
     GPS_STALE_THRESHOLD_MS: 60000,
     BOARDING_WINDOW_MINUTES: 10,
     WAITLIST_OFFER_MINUTES: 5,
+    RESCHEDULE_CUTOFF_MINUTES: 15,
+
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
 
   const IS_SUPABASE_CONFIGURED =
+    !!TRANSITCARE_CONFIG.SUPABASE_URL &&
+    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY &&
     !TRANSITCARE_CONFIG.SUPABASE_URL.includes("YOUR-PROJECT-REF") &&
     !TRANSITCARE_CONFIG.SUPABASE_ANON_KEY.includes("YOUR-PUBLIC-ANON-KEY");
 
+
   /* =======================================================================
-     02. EXTERNAL LIBRARIES
+     02. EXTERNAL LIBRARY LOADER
      ======================================================================= */
   const libraryCache = {};
+
   function loadExternalScript(url) {
     if (libraryCache[url]) return libraryCache[url];
     libraryCache[url] = new Promise(function (resolve, reject) {
       const existing = document.querySelector('script[src="' + url + '"]');
       if (existing) {
-        existing.addEventListener("load", resolve);
-        existing.addEventListener("error", function () { reject(new Error("Failed: " + url)); });
+        existing.addEventListener("load", function () { resolve(); });
+        existing.addEventListener("error", function () { reject(new Error("Failed to load " + url)); });
         return;
       }
-      const s = document.createElement("script");
-      s.src = url;
-      s.async = true;
-      s.onload = resolve;
-      s.onerror = function () { reject(new Error("Failed: " + url)); };
-      document.head.appendChild(s);
+      const script = document.createElement("script");
+      script.src = url;
+      script.async = true;
+      script.onload = function () { resolve(); };
+      script.onerror = function () { reject(new Error("Failed to load " + url)); };
+      document.head.appendChild(script);
     });
     return libraryCache[url];
   }
@@ -50,12 +93,12 @@
   function loadStylesheet(url) {
     if (document.querySelector('link[href="' + url + '"]')) return Promise.resolve();
     return new Promise(function (resolve) {
-      const l = document.createElement("link");
-      l.rel = "stylesheet";
-      l.href = url;
-      l.onload = resolve;
-      l.onerror = resolve;
-      document.head.appendChild(l);
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = url;
+      link.onload = function () { resolve(); };
+      link.onerror = function () { resolve(); };
+      document.head.appendChild(link);
     });
   }
 
@@ -65,12 +108,13 @@
     LEAFLET_CSS: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
   };
 
+
   /* =======================================================================
      03. SUPABASE INITIALIZATION
      ======================================================================= */
   let supabase = null;
 
-      function initSupabase() {
+  function initSupabase() {
     if (!IS_SUPABASE_CONFIGURED) {
       console.warn("[TransitCare] Supabase is not configured.");
       return null;
@@ -103,9 +147,7 @@
                works with every version.
                ------------------------------------------------------------- */
             lock: function () {
-              // Collect all arguments Supabase passed
               var args = Array.prototype.slice.call(arguments);
-              // Find the one that is a function (the acquire callback)
               var acquire = null;
               for (var i = 0; i < args.length; i++) {
                 if (typeof args[i] === "function") {
@@ -113,11 +155,9 @@
                   break;
                 }
               }
-              // If we found it, call it and return its promise
               if (acquire) {
                 return acquire();
               }
-              // Otherwise, just resolve immediately
               return Promise.resolve(null);
             }
           },
@@ -131,6 +171,7 @@
     }
   }
 
+
   /* =======================================================================
      04. APPLICATION STATE
      ======================================================================= */
@@ -140,9 +181,17 @@
     role: null,
     currentView: "home",
     notifications: [],
-    channels: { notifications: null, tripLocations: null },
+    channels: {
+      notifications: null,
+      tripLocations: null
+    },
     gpsWatchId: null,
-    activeTrip: null
+    activeTrip: null,
+    cache: {
+      terminals: null,
+      operators: null,
+      routes: null
+    }
   };
 
   function resetState() {
@@ -152,25 +201,30 @@
     AppState.currentView = "home";
     AppState.notifications = [];
     AppState.activeTrip = null;
+    AppState.cache = { terminals: null, operators: null, routes: null };
     stopAllRealtime();
     stopGpsWatch();
   }
 
+
   /* =======================================================================
      05. UTILITIES
      ======================================================================= */
-  function escapeHtml(v) {
-    if (v === null || v === undefined) return "";
-    return String(v)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  function escapeHtml(value) {
+    if (value === null || value === undefined) return "";
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function formatDateTime(iso) {
     if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "—";
-    return d.toLocaleString("en-NG", {
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return "—";
+    return date.toLocaleString("en-NG", {
       day: "2-digit", month: "short", year: "numeric",
       hour: "2-digit", minute: "2-digit"
     });
@@ -178,44 +232,46 @@
 
   function formatTime(iso) {
     if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "—";
-    return d.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit" });
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return "—";
+    return date.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit" });
   }
 
   function formatDate(iso) {
     if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "—";
-    return d.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return "—";
+    return date.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
   }
 
   function formatCurrency(amount) {
     if (amount === null || amount === undefined || amount === "") return "—";
-    const n = Number(amount);
-    if (isNaN(n)) return "—";
-    return "₦" + n.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const numeric = Number(amount);
+    if (isNaN(numeric)) return "—";
+    return "₦" + numeric.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   }
 
   function formatRelativeTime(iso) {
     if (!iso) return "—";
-    const diff = Date.now() - new Date(iso).getTime();
-    if (isNaN(diff)) return "—";
-    const s = Math.floor(diff / 1000);
-    if (s < 10) return "just now";
-    if (s < 60) return s + " seconds ago";
-    const m = Math.floor(s / 60);
-    if (m < 60) return m + (m === 1 ? " minute ago" : " minutes ago");
-    const h = Math.floor(m / 60);
-    if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
-    const d = Math.floor(h / 24);
-    return d + (d === 1 ? " day ago" : " days ago");
+    const then = new Date(iso).getTime();
+    if (isNaN(then)) return "—";
+    const diff = Date.now() - then;
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 10) return "just now";
+    if (seconds < 60) return seconds + " seconds ago";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + (minutes === 1 ? " minute ago" : " minutes ago");
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + (hours === 1 ? " hour ago" : " hours ago");
+    const days = Math.floor(hours / 24);
+    if (days < 30) return days + (days === 1 ? " day ago" : " days ago");
+    return formatDate(iso);
   }
 
   function getInitials(name) {
     if (!name) return "–";
-    const p = String(name).trim().split(/\s+/).slice(0, 2);
-    return p.map(function (x) { return x.charAt(0).toUpperCase(); }).join("") || "–";
+    const parts = String(name).trim().split(/\s+/).slice(0, 2);
+    return parts.map(function (p) { return p.charAt(0).toUpperCase(); }).join("") || "–";
   }
 
   function setText(id, text) {
@@ -223,36 +279,40 @@
     if (el) el.textContent = text;
   }
 
-  function humanizeStatus(s) {
-    if (!s) return "—";
-    return String(s).replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  function humanizeStatus(status) {
+    if (!status) return "—";
+    return String(status)
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, function (c) { return c.toUpperCase(); });
   }
 
   function generateTripCode() {
-    return "TC-" + Math.floor(100 + Math.random() * 900);
+    const random = Math.floor(100 + Math.random() * 900);
+    return "TC-" + random;
   }
 
   function generateTicketCode() {
     const stamp = Date.now().toString(36).toUpperCase();
-    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-    return "TKT-" + stamp + "-" + rand;
+    const random = Math.random().toString(36).slice(2, 6).toUpperCase();
+    return "TKT-" + stamp + "-" + random;
   }
 
   function nowIso() { return new Date().toISOString(); }
 
+
   /* =======================================================================
-     06. TOAST
+     06. TOAST SYSTEM
      ======================================================================= */
   const Toast = (function () {
     const container = document.getElementById("toast-container");
     const ICONS = { success: "✓", danger: "✕", warning: "⚠", info: "ℹ" };
 
-    function show(title, message, type, duration) {
+    function show(title, message, type, durationMs) {
       if (!container) return;
-      const t = document.createElement("div");
-      t.className = "toast toast--" + (type || "info");
-      t.setAttribute("role", "alert");
-      t.innerHTML =
+      const toast = document.createElement("div");
+      toast.className = "toast toast--" + (type || "info");
+      toast.setAttribute("role", "alert");
+      toast.innerHTML =
         '<span class="toast__icon" aria-hidden="true">' + (ICONS[type] || ICONS.info) + '</span>' +
         '<div class="toast__content">' +
           '<p class="toast__title">' + escapeHtml(title) + '</p>' +
@@ -261,14 +321,18 @@
         '<button type="button" class="toast__close" aria-label="Dismiss">&times;</button>';
 
       const remove = function () {
-        if (!t.isConnected) return;
-        t.classList.add("is-leaving");
-        setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 220);
+        if (!toast.isConnected) return;
+        toast.classList.add("is-leaving");
+        setTimeout(function () {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 220);
       };
 
-      t.querySelector(".toast__close").addEventListener("click", remove);
-      container.appendChild(t);
-      if ((duration || 4800) > 0) setTimeout(remove, duration || 4800);
+      toast.querySelector(".toast__close").addEventListener("click", remove);
+      container.appendChild(toast);
+
+      const lifetime = typeof durationMs === "number" ? durationMs : 4800;
+      if (lifetime > 0) setTimeout(remove, lifetime);
     }
 
     return {
@@ -279,37 +343,48 @@
     };
   })();
 
+
   /* =======================================================================
-     07. MODAL
+     07. MODAL SYSTEM
      ======================================================================= */
   const Modal = (function () {
     const backdrop = document.getElementById("modal-backdrop");
     const titleEl = document.getElementById("modal-title");
     const bodyEl = document.getElementById("modal-body");
     const footerEl = document.getElementById("modal-footer");
-    const closeBtn = document.getElementById("modal-close-button");
-    let lastFocused = null;
-    let onCloseCb = null;
+    const closeButton = document.getElementById("modal-close-button");
 
-    function open(opts) {
+    let lastFocused = null;
+    let onCloseCallback = null;
+
+    function open(options) {
       if (!backdrop) return;
       lastFocused = document.activeElement;
-      onCloseCb = opts.onClose || null;
-      titleEl.textContent = opts.title || "Dialog";
-      bodyEl.innerHTML = opts.body || "";
-      footerEl.innerHTML = opts.footer || "";
+      onCloseCallback = options.onClose || null;
+
+      titleEl.textContent = options.title || "Dialog";
+      bodyEl.innerHTML = options.body || "";
+      footerEl.innerHTML = options.footer || "";
+
       backdrop.classList.remove("is-hidden");
       backdrop.setAttribute("aria-hidden", "false");
       document.body.style.overflow = "hidden";
 
-      footerEl.querySelectorAll("[data-modal-action]").forEach(function (b) {
-        b.addEventListener("click", function () {
-          if (typeof opts.onAction === "function") opts.onAction(b.getAttribute("data-modal-action"), b);
+      footerEl.querySelectorAll("[data-modal-action]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          if (typeof options.onAction === "function") {
+            options.onAction(button.getAttribute("data-modal-action"), button);
+          }
         });
       });
 
-      const focus = bodyEl.querySelector("input,select,textarea,button,[href]");
-      setTimeout(function () { (focus || closeBtn).focus(); }, 30);
+      const focusTarget = bodyEl.querySelector(
+        "input, select, textarea, button, [href], [tabindex]:not([tabindex='-1'])"
+      );
+      setTimeout(function () {
+        if (focusTarget) focusTarget.focus();
+        else if (closeButton) closeButton.focus();
+      }, 30);
     }
 
     function close() {
@@ -319,155 +394,182 @@
       document.body.style.overflow = "";
       bodyEl.innerHTML = "";
       footerEl.innerHTML = "";
-      if (typeof onCloseCb === "function") onCloseCb();
-      onCloseCb = null;
+      if (typeof onCloseCallback === "function") onCloseCallback();
+      onCloseCallback = null;
       if (lastFocused && lastFocused.focus) lastFocused.focus();
     }
 
-    function confirm(opts) {
+    function confirm(options) {
       return new Promise(function (resolve) {
         open({
-          title: opts.title || "Please confirm",
-          body: "<p>" + escapeHtml(opts.message || "Are you sure?") + "</p>",
+          title: options.title || "Please confirm",
+          body: "<p>" + escapeHtml(options.message || "Are you sure?") + "</p>",
           footer:
             '<button type="button" class="button button--ghost" data-modal-action="cancel">' +
-              escapeHtml(opts.cancelLabel || "Cancel") + '</button>' +
+              escapeHtml(options.cancelLabel || "Cancel") +
+            '</button>' +
             '<button type="button" class="button ' +
-              (opts.danger ? "button--danger" : "button--primary") +
+              (options.danger ? "button--danger" : "button--primary") +
               '" data-modal-action="confirm">' +
-              escapeHtml(opts.confirmLabel || "Confirm") + '</button>',
-          onAction: function (a) { close(); resolve(a === "confirm"); },
+              escapeHtml(options.confirmLabel || "Confirm") +
+            '</button>',
+          onAction: function (action) {
+            close();
+            resolve(action === "confirm");
+          },
           onClose: function () { resolve(false); }
         });
       });
     }
 
-    if (closeBtn) closeBtn.addEventListener("click", close);
-    if (backdrop) backdrop.addEventListener("click", function (e) {
-      if (e.target === backdrop) close();
-    });
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && backdrop && !backdrop.classList.contains("is-hidden")) close();
+    if (closeButton) closeButton.addEventListener("click", close);
+    if (backdrop) {
+      backdrop.addEventListener("click", function (event) {
+        if (event.target === backdrop) close();
+      });
+    }
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && backdrop && !backdrop.classList.contains("is-hidden")) {
+        close();
+      }
     });
 
     return { open: open, close: close, confirm: confirm };
   })();
 
+
   /* =======================================================================
-     08. LOADER
+     08. GLOBAL LOADER
      ======================================================================= */
   const Loader = (function () {
     const overlay = document.getElementById("global-loader");
     const textEl = document.getElementById("global-loader-text");
-    let count = 0;
-    function show(msg) {
-      count++;
-      if (textEl) textEl.textContent = msg || "Working…";
+    let counter = 0;
+
+    function show(message) {
+      counter += 1;
+      if (textEl) textEl.textContent = message || "Working…";
       if (overlay) {
         overlay.classList.remove("is-hidden");
         overlay.setAttribute("aria-hidden", "false");
       }
     }
+
     function hide() {
-      count = Math.max(0, count - 1);
-      if (count === 0 && overlay) {
+      counter = Math.max(0, counter - 1);
+      if (counter === 0 && overlay) {
         overlay.classList.add("is-hidden");
         overlay.setAttribute("aria-hidden", "true");
       }
     }
+
     return { show: show, hide: hide };
   })();
 
-  function renderLoading(container, msg) {
+  function renderLoading(container, message) {
     if (!container) return;
     container.innerHTML =
       '<div class="loading-state">' +
         '<span class="spinner spinner--small" aria-hidden="true"></span>' +
-        '<span>' + escapeHtml(msg || "Loading…") + '</span>' +
+        '<span>' + escapeHtml(message || "Loading…") + '</span>' +
       '</div>';
   }
 
-  function renderEmpty(container, opts) {
+  function renderEmpty(container, options) {
     if (!container) return;
     container.innerHTML =
       '<div class="empty-state">' +
-        '<span class="empty-state__icon" aria-hidden="true">' + escapeHtml(opts.icon || "📭") + '</span>' +
-        '<p class="empty-state__title">' + escapeHtml(opts.title || "Nothing here yet") + '</p>' +
-        '<p class="empty-state__message">' + escapeHtml(opts.message || "") + '</p>' +
-        (opts.actionHtml ? '<div class="empty-state__actions">' + opts.actionHtml + '</div>' : "") +
+        '<span class="empty-state__icon" aria-hidden="true">' +
+          escapeHtml(options.icon || "📭") +
+        '</span>' +
+        '<p class="empty-state__title">' + escapeHtml(options.title || "Nothing here yet") + '</p>' +
+        '<p class="empty-state__message">' + escapeHtml(options.message || "") + '</p>' +
+        (options.actionHtml ? '<div class="empty-state__actions">' + options.actionHtml + '</div>' : "") +
       '</div>';
   }
 
-  function renderError(container, msg, retry) {
+  function renderError(container, message, retryFn) {
     if (!container) return;
     container.innerHTML =
       '<div class="empty-state">' +
         '<span class="empty-state__icon" aria-hidden="true">⚠️</span>' +
         '<p class="empty-state__title">Something went wrong</p>' +
-        '<p class="empty-state__message">' + escapeHtml(msg || "Please try again.") + '</p>' +
-        (retry ? '<div class="empty-state__actions"><button type="button" class="button button--secondary" id="retry-button">Retry</button></div>' : "") +
+        '<p class="empty-state__message">' + escapeHtml(message || "Please try again.") + '</p>' +
+        (retryFn ? '<div class="empty-state__actions"><button type="button" class="button button--secondary" id="retry-button">Retry</button></div>' : "") +
       '</div>';
-    if (retry) {
-      const b = container.querySelector("#retry-button");
-      if (b) b.addEventListener("click", retry);
+    if (retryFn) {
+      const retry = container.querySelector("#retry-button");
+      if (retry) retry.addEventListener("click", retryFn);
     }
   }
 
+
   /* =======================================================================
-     09. VALIDATORS
+     09. FORM VALIDATION
      ======================================================================= */
   const Validators = {
-    required: function (v) { return v !== null && v !== undefined && String(v).trim().length > 0; },
-    email: function (v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim()); },
-    phone: function (v) {
-      const d = String(v).replace(/[^\d]/g, "");
-      return d.length >= 7 && d.length <= 15;
+    required: function (value) {
+      return value !== null && value !== undefined && String(value).trim().length > 0;
     },
-    passwordStrength: function (v) {
-      const s = String(v || "");
+    email: function (value) {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value).trim());
+    },
+    phone: function (value) {
+      const digits = String(value).replace(/[^\d]/g, "");
+      return digits.length >= 7 && digits.length <= 15;
+    },
+    passwordStrength: function (value) {
+      const v = String(value || "");
       let score = 0;
-      if (s.length >= 8) score++;
-      if (/[a-z]/.test(s)) score++;
-      if (/[A-Z]/.test(s)) score++;
-      if (/\d/.test(s)) score++;
-      if (/[^A-Za-z0-9]/.test(s)) score++;
+      if (v.length >= 8) score++;
+      if (/[a-z]/.test(v)) score++;
+      if (/[A-Z]/.test(v)) score++;
+      if (/\d/.test(v)) score++;
+      if (/[^A-Za-z0-9]/.test(v)) score++;
       return score;
     }
   };
 
-  function setFieldError(fieldId, msg) {
+  function setFieldError(fieldId, message) {
     const input = document.getElementById(fieldId);
     if (!input) return;
     const wrapper = input.closest(".field");
-    const err = document.querySelector('[data-error-for="' + fieldId + '"]');
-    if (msg) {
+    const errorEl = document.querySelector('[data-error-for="' + fieldId + '"]');
+
+    if (message) {
       if (wrapper) wrapper.classList.add("has-error");
-      if (err) err.textContent = msg;
+      if (errorEl) errorEl.textContent = message;
       input.setAttribute("aria-invalid", "true");
     } else {
       if (wrapper) wrapper.classList.remove("has-error");
-      if (err) err.textContent = "";
+      if (errorEl) errorEl.textContent = "";
       input.removeAttribute("aria-invalid");
     }
   }
 
   function clearFormErrors(form) {
     if (!form) return;
-    form.querySelectorAll(".field.has-error").forEach(function (f) { f.classList.remove("has-error"); });
-    form.querySelectorAll(".field__error").forEach(function (e) { e.textContent = ""; });
-    form.querySelectorAll("[aria-invalid]").forEach(function (e) { e.removeAttribute("aria-invalid"); });
+    form.querySelectorAll(".field.has-error").forEach(function (field) {
+      field.classList.remove("has-error");
+    });
+    form.querySelectorAll(".field__error").forEach(function (el) {
+      el.textContent = "";
+    });
+    form.querySelectorAll("[aria-invalid]").forEach(function (el) {
+      el.removeAttribute("aria-invalid");
+    });
   }
 
-  function setFormMessage(elId, type, msg) {
-    const el = document.getElementById(elId);
+  function setFormMessage(elementId, type, message) {
+    const el = document.getElementById(elementId);
     if (!el) return;
-    if (!msg) {
+    if (!message) {
       el.className = "alert is-hidden";
       el.innerHTML = "";
       return;
     }
     el.className = "alert alert--" + type;
-    el.innerHTML = escapeHtml(msg);
+    el.innerHTML = escapeHtml(message);
   }
 
   function bindPasswordMeter(inputId, barId, hintId) {
@@ -478,22 +580,36 @@
 
     input.addEventListener("input", function () {
       const score = Validators.passwordStrength(input.value);
-      bar.style.width = ((score / 5) * 100) + "%";
+      const percentage = (score / 5) * 100;
+      bar.style.width = percentage + "%";
       bar.classList.remove("is-weak", "is-fair", "is-good", "is-strong");
+
       let label = "Use 8+ characters with letters and numbers.";
-      if (!input.value.length) { bar.style.width = "0%"; }
-      else if (score <= 2) { bar.classList.add("is-weak"); label = "Weak — add more characters and variety."; }
-      else if (score === 3) { bar.classList.add("is-fair"); label = "Fair — add a number or symbol."; }
-      else if (score === 4) { bar.classList.add("is-good"); label = "Good — add a symbol for extra strength."; }
-      else { bar.classList.add("is-strong"); label = "Strong password."; }
+      if (input.value.length === 0) {
+        bar.style.width = "0%";
+      } else if (score <= 2) {
+        bar.classList.add("is-weak");
+        label = "Weak — add more characters and variety.";
+      } else if (score === 3) {
+        bar.classList.add("is-fair");
+        label = "Fair — add a number or symbol to strengthen it.";
+      } else if (score === 4) {
+        bar.classList.add("is-good");
+        label = "Good — add a symbol for extra strength.";
+      } else {
+        bar.classList.add("is-strong");
+        label = "Strong password.";
+      }
       if (hint) hint.textContent = label;
     });
   }
 
+
   /* =======================================================================
-     10. AUTH
+     10. AUTHENTICATION
      ======================================================================= */
   const Auth = {
+
     async signUp(payload) {
       if (!supabase) throw new Error("Supabase is not configured.");
       const { data, error } = await supabase.auth.signUp({
@@ -509,11 +625,23 @@
         }
       });
       if (error) throw error;
-      return {
-        needsVerification: data.session === null,
-        user: data.user,
-        session: data.session
-      };
+
+      const needsVerification = data.session === null;
+
+      if (!needsVerification && data.user && data.user.id) {
+        try {
+          await supabase.from("profiles").insert({
+            id: data.user.id,
+            full_name: payload.fullName,
+            email: payload.email,
+            phone: payload.phone || null,
+            role: payload.role || "passenger",
+            status: payload.role === "driver" ? "email_verified" : "active"
+          });
+        } catch (err) { console.warn("[TransitCare] Profile insert skipped:", err); }
+      }
+
+      return { needsVerification: needsVerification, user: data.user, session: data.session };
     },
 
     async signIn(email, password) {
@@ -549,7 +677,7 @@
 
     async signOut() {
       if (supabase) {
-        try { await supabase.auth.signOut(); } catch (e) { console.warn(e); }
+        try { await supabase.auth.signOut(); } catch (err) { console.warn(err); }
       }
       resetState();
       showAuthScreen();
@@ -559,36 +687,62 @@
       if (!supabase) return null;
       try {
         const { data, error } = await supabase.auth.getSession();
-        if (error) return null;
+        if (error) {
+          console.warn("[TransitCare] getSession error:", error.message);
+          return null;
+        }
         return data.session;
-      } catch (e) { return null; }
+      } catch (err) {
+        console.warn("[TransitCare] getSession failed:", err);
+        return null;
+      }
     }
   };
 
+
+  /* =======================================================================
+     11. SESSION & PROFILE
+     ======================================================================= */
   const Profile = {
+
     async fetch(userId) {
       if (!supabase || !userId) return null;
       const { data, error } = await supabase
-        .from("profiles").select("*").eq("id", userId).maybeSingle();
-      if (error) return null;
+        .from("profiles")
+        .select("*")
+        .eq("id", userId)
+        .maybeSingle();
+      if (error) {
+        console.warn("[TransitCare] Profile fetch error:", error.message);
+        return null;
+      }
       return data;
     },
+
     async update(userId, patch) {
       if (!supabase || !userId) return null;
       const { data, error } = await supabase
-        .from("profiles").update(patch).eq("id", userId).select().maybeSingle();
+        .from("profiles")
+        .update(patch)
+        .eq("id", userId)
+        .select()
+        .maybeSingle();
       if (error) throw error;
       return data;
     },
-    resolveRole(profile, user) {
+
+    resolveRole(profile, authUser) {
       if (profile && profile.role) return profile.role;
-      if (user && user.user_metadata && user.user_metadata.role) return user.user_metadata.role;
+      if (authUser && authUser.user_metadata && authUser.user_metadata.role) {
+        return authUser.user_metadata.role;
+      }
       return "passenger";
     }
   };
 
+
   /* =======================================================================
-     11. NAVIGATION
+     12. ROLE-BASED NAVIGATION
      ======================================================================= */
   const NAVIGATION = {
     passenger: [
@@ -598,28 +752,28 @@
       { key: "my-trips",      label: "My trips",      icon: "🧭" },
       { key: "tickets",       label: "Tickets",       icon: "🎫" },
       { group: "Account" },
-      { key: "notifications", label: "Notifications", icon: "🔔", badgeKey: "unread" },
+      { key: "notifications", label: "Notifications", icon: "🔔", badgeKey: "unreadNotifications" },
       { key: "profile",       label: "Profile",       icon: "👤" }
     ],
     driver: [
       { group: "Operations" },
-      { key: "driver-dashboard",   label: "Dashboard",          icon: "📊" },
-      { key: "make-bus-available", label: "Make bus available", icon: "🚌" },
-      { key: "active-trip",        label: "Active trip",        icon: "📍" },
-      { key: "driver-trips",       label: "My trips",           icon: "🧭" },
-      { key: "scan-ticket",        label: "Scan ticket",        icon: "📷" },
+      { key: "driver-dashboard",   label: "Dashboard",           icon: "📊" },
+      { key: "make-bus-available", label: "Make bus available",  icon: "🚌" },
+      { key: "active-trip",        label: "Active trip",         icon: "📍" },
+      { key: "driver-trips",       label: "My trips",            icon: "🧭" },
+      { key: "scan-ticket",        label: "Scan ticket",         icon: "📷" },
       { group: "Account" },
-      { key: "notifications",      label: "Notifications",      icon: "🔔", badgeKey: "unread" },
-      { key: "profile",            label: "Profile",            icon: "👤" }
+      { key: "notifications",      label: "Notifications",       icon: "🔔", badgeKey: "unreadNotifications" },
+      { key: "profile",            label: "Profile",             icon: "👤" }
     ],
     operator: [
       { group: "Fleet" },
-      { key: "operator-dashboard", label: "Dashboard", icon: "📊" },
-      { key: "operator-fleet",     label: "Vehicles",  icon: "🚌" },
-      { key: "operator-drivers",   label: "Drivers",   icon: "👨‍✈️" },
-      { key: "operator-trips",     label: "Trips",     icon: "🧭" },
+      { key: "operator-dashboard", label: "Dashboard",    icon: "📊" },
+      { key: "operator-fleet",     label: "Vehicles",     icon: "🚌" },
+      { key: "operator-drivers",   label: "Drivers",      icon: "👨‍✈️" },
+      { key: "operator-trips",     label: "Trips",        icon: "🧭" },
       { group: "Account" },
-      { key: "notifications",      label: "Notifications", icon: "🔔", badgeKey: "unread" },
+      { key: "notifications",      label: "Notifications", icon: "🔔", badgeKey: "unreadNotifications" },
       { key: "profile",            label: "Profile",       icon: "👤" }
     ],
     admin: [
@@ -639,7 +793,7 @@
       { key: "admin-reports",   label: "Reports",         icon: "📈" },
       { group: "Platform" },
       { key: "admin-settings",  label: "Settings",        icon: "⚙️" },
-      { key: "notifications",   label: "Notifications",   icon: "🔔", badgeKey: "unread" },
+      { key: "notifications",   label: "Notifications",   icon: "🔔", badgeKey: "unreadNotifications" },
       { key: "profile",         label: "Profile",         icon: "👤" }
     ]
   };
@@ -652,7 +806,7 @@
   };
 
   function countBadge(key) {
-    if (key === "unread") {
+    if (key === "unreadNotifications") {
       return AppState.notifications.filter(function (n) { return !n.is_read; }).length;
     }
     return 0;
@@ -665,15 +819,17 @@
 
     if (sidebar) {
       sidebar.innerHTML = items.map(function (item) {
-        if (item.group) return '<p class="app-nav__group-label">' + escapeHtml(item.group) + "</p>";
-        const active = AppState.currentView === item.key;
-        const count = item.badgeKey ? countBadge(item.badgeKey) : 0;
+        if (item.group) {
+          return '<p class="app-nav__group-label">' + escapeHtml(item.group) + "</p>";
+        }
+        const isActive = AppState.currentView === item.key;
+        const badgeCount = item.badgeKey ? countBadge(item.badgeKey) : 0;
         return (
-          '<button type="button" class="app-nav__item' + (active ? " is-active" : "") +
+          '<button type="button" class="app-nav__item' + (isActive ? " is-active" : "") +
             '" data-nav-link data-view="' + escapeHtml(item.key) + '">' +
             '<span class="app-nav__icon" aria-hidden="true">' + escapeHtml(item.icon) + '</span>' +
             '<span class="app-nav__label">' + escapeHtml(item.label) + '</span>' +
-            (count > 0 ? '<span class="app-nav__count">' + count + '</span>' : "") +
+            (badgeCount > 0 ? '<span class="app-nav__count">' + badgeCount + '</span>' : "") +
           '</button>'
         );
       }).join("");
@@ -685,13 +841,13 @@
       bottomNav.innerHTML = keys.map(function (key) {
         const item = flat.find(function (i) { return i.key === key; });
         if (!item) return "";
-        const active = AppState.currentView === item.key;
-        const count = item.badgeKey ? countBadge(item.badgeKey) : 0;
+        const isActive = AppState.currentView === item.key;
+        const badgeCount = item.badgeKey ? countBadge(item.badgeKey) : 0;
         return (
-          '<button type="button" class="app-bottom-nav__item' + (active ? " is-active" : "") +
+          '<button type="button" class="app-bottom-nav__item' + (isActive ? " is-active" : "") +
             '" data-nav-link data-view="' + escapeHtml(item.key) + '">' +
             '<span class="app-bottom-nav__icon" aria-hidden="true">' + escapeHtml(item.icon) +
-              (count > 0 ? '<span class="icon-button__badge">' + count + '</span>' : "") +
+              (badgeCount > 0 ? '<span class="icon-button__badge">' + badgeCount + '</span>' : "") +
             '</span>' +
             '<span class="app-bottom-nav__label">' + escapeHtml(item.label) + '</span>' +
           '</button>'
@@ -700,42 +856,47 @@
     }
 
     document.querySelectorAll("[data-nav-link]").forEach(function (el) {
-      el.addEventListener("click", function (e) {
-        e.preventDefault();
-        const v = el.getAttribute("data-view");
-        if (v) Router.go(v);
+      el.addEventListener("click", function (event) {
+        event.preventDefault();
+        const view = el.getAttribute("data-view");
+        if (view) Router.go(view);
         closeSidebar();
       });
     });
   }
 
+
   /* =======================================================================
-     12. ROUTER
+     13. VIEW ROUTER
      ======================================================================= */
   const Router = {
     registry: {},
-    register: function (key, def) { this.registry[key] = def; },
+    register: function (key, definition) { this.registry[key] = definition; },
     go: async function (key, params) {
-      const def = this.registry[key];
+      const definition = this.registry[key];
       const root = document.getElementById("view-root");
       if (!root) return;
-      if (!def) {
+
+      if (!definition) {
         root.innerHTML = '<div class="empty-state"><p class="empty-state__title">View not found</p></div>';
         return;
       }
+
       AppState.currentView = key;
       renderNavigation();
-      window.scrollTo({ top: 0 });
+      window.scrollTo({ top: 0, behavior: "auto" });
 
       const inner = document.createElement("div");
       inner.className = "app-main__inner";
       inner.innerHTML =
         '<header class="page-header">' +
           '<div class="page-header__titles">' +
-            '<h1 class="page-header__title">' + escapeHtml(def.title || "") + '</h1>' +
-            (def.subtitle ? '<p class="page-header__subtitle">' + escapeHtml(def.subtitle) + '</p>' : "") +
+            '<h1 class="page-header__title">' + escapeHtml(definition.title || "") + '</h1>' +
+            (definition.subtitle
+              ? '<p class="page-header__subtitle">' + escapeHtml(definition.subtitle) + '</p>'
+              : "") +
           '</div>' +
-          (def.headerActions ? '<div class="page-header__actions">' + def.headerActions + '</div>' : "") +
+          (definition.headerActions ? '<div class="page-header__actions">' + definition.headerActions + '</div>' : "") +
         '</header>' +
         '<div id="view-content" class="view-stack"></div>';
 
@@ -743,91 +904,136 @@
       root.appendChild(inner);
 
       try {
-        await def.render(document.getElementById("view-content"), params || {});
-      } catch (e) {
-        console.error("[TransitCare] View render failed:", key, e);
-        renderError(document.getElementById("view-content"), e.message, function () { Router.go(key, params); });
+        await definition.render(document.getElementById("view-content"), params || {});
+      } catch (error) {
+        console.error("[TransitCare] View render failed:", key, error);
+        renderError(
+          document.getElementById("view-content"),
+          error && error.message ? error.message : "Unable to load this view.",
+          function () { Router.go(key, params); }
+        );
       }
     }
   };
 
+
   /* =======================================================================
-     13. SHARED DATA HELPERS
+     SHARED DATA ACCESS HELPERS
      ======================================================================= */
   const Data = {
+
     async getTerminals(activeOnly) {
       if (!supabase) return [];
-      let q = supabase.from("terminals").select("*").order("name");
-      if (activeOnly) q = q.eq("status", "active");
-      const { data, error } = await q;
+      let query = supabase.from("terminals").select("*").order("name", { ascending: true });
+      if (activeOnly) query = query.eq("status", "active");
+      const { data, error } = await query;
       if (error) throw error;
       return data || [];
     },
+
+    async getOperators(activeOnly) {
+      if (!supabase) return [];
+      let query = supabase.from("operators").select("*").order("name", { ascending: true });
+      if (activeOnly) query = query.eq("status", "active");
+      const { data, error } = await query;
+      if (error) throw error;
+      return data || [];
+    },
+
     async getRoutes(activeOnly) {
       if (!supabase) return [];
-      let q = supabase.from("routes").select("*").order("origin");
-      if (activeOnly) q = q.eq("status", "active");
-      const { data, error } = await q;
+      let query = supabase.from("routes").select("*").order("origin", { ascending: true });
+      if (activeOnly) query = query.eq("status", "active");
+      const { data, error } = await query;
       if (error) throw error;
       return data || [];
     },
+
     async getVehicles(operatorId) {
       if (!supabase) return [];
-      let q = supabase.from("vehicles").select("*").order("registration_number");
-      if (operatorId) q = q.eq("operator_id", operatorId);
-      const { data, error } = await q;
+      let query = supabase.from("vehicles").select("*").order("registration_number", { ascending: true });
+      if (operatorId) query = query.eq("operator_id", operatorId);
+      const { data, error } = await query;
       if (error) throw error;
       return data || [];
     },
+
     async getSeatStats(tripId, capacity) {
-      if (!supabase || !tripId) return { capacity: capacity || 0, available: capacity || 0 };
-      const { data, error } = await supabase.from("bookings").select("seat_number, status")
-        .eq("trip_id", tripId).in("status", ["reserved", "boarded"]);
+      if (!supabase || !tripId) return { capacity: capacity || 0, reserved: 0, boarded: 0, available: capacity || 0 };
+      const { data, error } = await supabase
+        .from("bookings")
+        .select("seat_number, status")
+        .eq("trip_id", tripId)
+        .in("status", ["reserved", "boarded"]);
       if (error) throw error;
+
       const reserved = (data || []).filter(function (b) { return b.status === "reserved"; }).length;
       const boarded = (data || []).filter(function (b) { return b.status === "boarded"; }).length;
       const cap = capacity || 0;
-      return { capacity: cap, reserved: reserved, boarded: boarded, available: Math.max(0, cap - reserved - boarded) };
+      return {
+        capacity: cap,
+        reserved: reserved,
+        boarded: boarded,
+        available: Math.max(0, cap - reserved - boarded)
+      };
     },
-    async logAudit(action, type, id, details) {
+
+    async logAudit(action, entityType, entityId, details) {
       if (!supabase || !AppState.authUser) return;
       try {
         await supabase.from("audit_logs").insert({
           actor_id: AppState.authUser.id,
-          action: action, entity_type: type || null,
-          entity_id: id || null, details: details || null
+          action: action,
+          entity_type: entityType || null,
+          entity_id: entityId || null,
+          details: details || null
         });
-      } catch (e) { console.warn(e); }
+      } catch (err) { console.warn("[TransitCare] Audit log failed:", err); }
     }
   };
+
 
   /* =======================================================================
      14. PASSENGER VIEWS
      ======================================================================= */
+
   Router.register("home", {
     title: "Welcome back",
     subtitle: "Know your ride before you leave.",
     render: async function (container) {
       const name = (AppState.profile && AppState.profile.full_name) || "Commuter";
-      const first = String(name).split(" ")[0];
+      const firstName = String(name).split(" ")[0];
+
       container.innerHTML =
-        '<section class="card"><div class="card__body">' +
-          '<p class="eyebrow">Eko TransitCare</p>' +
-          '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">Hello, ' + escapeHtml(first) + ' 👋</h2>' +
-          '<p class="text-muted mt-2">Find a bus, reserve a seat and track your ride — all before you leave home.</p>' +
-          '<div class="button-group mt-4">' +
-            '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
-            '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
+        '<section class="card">' +
+          '<div class="card__body">' +
+            '<p class="eyebrow">Eko TransitCare</p>' +
+            '<h2 style="margin-top:6px;font-size:22px;font-weight:800;letter-spacing:-0.02em;">' +
+              'Hello, ' + escapeHtml(firstName) + ' 👋' +
+            '</h2>' +
+            '<p class="text-muted mt-2">' +
+              'Find a bus, reserve a seat and track your ride — all before you leave home.' +
+            '</p>' +
+            '<div class="button-group mt-4">' +
+              '<button type="button" class="button button--primary" data-nav-link data-view="search">🔍 Find a bus</button>' +
+              '<button type="button" class="button button--secondary" data-nav-link data-view="tickets">🎫 My tickets</button>' +
+            '</div>' +
           '</div>' +
-        '</div></section>' +
-        '<section class="card"><div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
-        '<div class="card__body" id="home-upcoming"></div></section>';
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Upcoming trips</h3></div>' +
+          '<div class="card__body" id="home-upcoming"></div>' +
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Recent notifications</h3></div>' +
+          '<div class="card__body card__body--flush" id="home-notifications"></div>' +
+        '</section>';
 
       document.querySelectorAll("[data-nav-link]").forEach(function (el) {
-        el.addEventListener("click", function (e) {
-          e.preventDefault();
-          const v = el.getAttribute("data-view");
-          if (v) Router.go(v);
+        el.addEventListener("click", function (event) {
+          event.preventDefault();
+          const view = el.getAttribute("data-view");
+          if (view) Router.go(view);
         });
       });
 
@@ -839,42 +1045,78 @@
           .select("*, trips(*, routes(origin, destination), vehicles(registration_number))")
           .eq("passenger_id", AppState.authUser.id)
           .in("status", ["reserved", "boarded"])
-          .order("created_at", { ascending: false }).limit(3);
+          .order("created_at", { ascending: false })
+          .limit(3);
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(upcoming, { icon: "🧭", title: "No upcoming trips yet", message: "Search for a bus and reserve your seat." });
+        if (!data || data.length === 0) {
+          renderEmpty(upcoming, {
+            icon: "🧭",
+            title: "No upcoming trips yet",
+            message: "Search for a bus and reserve your seat — your trips will appear here."
+          });
         } else {
           upcoming.innerHTML = '<div class="list">' + data.map(renderBookingRow).join("") + '</div>';
         }
-      } catch (e) { renderError(upcoming, e.message); }
+      } catch (err) { renderError(upcoming, err.message); }
+
+      const notif = document.getElementById("home-notifications");
+      try {
+        renderLoading(notif, "Loading notifications…");
+        const { data, error } = await supabase
+          .from("notifications")
+          .select("*")
+          .eq("recipient_id", AppState.authUser.id)
+          .order("created_at", { ascending: false })
+          .limit(4);
+        if (error) throw error;
+        if (!data || data.length === 0) {
+          renderEmpty(notif, {
+            icon: "🔔",
+            title: "No notifications yet",
+            message: "Trip reminders and ticket updates will appear here."
+          });
+        } else {
+          notif.innerHTML = data.map(renderNotificationRow).join("");
+        }
+      } catch (err) { renderError(notif, err.message); }
     }
   });
 
-  function renderBookingRow(b) {
-    const trip = b.trips || {};
+  function renderBookingRow(booking) {
+    const trip = booking.trips || {};
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
     return (
-      '<div class="list__item"><div class="list__main">' +
-        '<p class="list__title">' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
-        '<p class="list__meta">' + escapeHtml(trip.trip_code || "—") + ' · ' +
-          escapeHtml(vehicle.registration_number || "—") + ' · Seat ' + escapeHtml(b.seat_number || "—") + '</p>' +
-      '</div>' +
-      '<span class="badge badge--' + escapeHtml(b.status || "reserved") + '">' + escapeHtml(humanizeStatus(b.status)) + '</span>' +
+      '<div class="list__item">' +
+        '<div class="list__main">' +
+          '<p class="list__title">' +
+            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") +
+          '</p>' +
+          '<p class="list__meta">' +
+            escapeHtml(trip.trip_code || "—") + ' · ' +
+            escapeHtml(vehicle.registration_number || "—") + ' · ' +
+            'Seat ' + escapeHtml(booking.seat_number || "—") +
+          '</p>' +
+        '</div>' +
+        '<div class="list__actions">' +
+          '<span class="badge badge--' + escapeHtml(booking.status || "reserved") + '">' +
+            escapeHtml(humanizeStatus(booking.status)) +
+          '</span>' +
+        '</div>' +
       '</div>'
     );
   }
 
-  function renderNotificationRow(n) {
+  function renderNotificationRow(notification) {
     return (
-      '<div class="notification-item' + (n.is_read ? "" : " notification-item--unread") + '" data-notification-id="' + escapeHtml(n.id) + '">' +
+      '<div class="notification-item' + (notification.is_read ? "" : " notification-item--unread") + '" data-notification-id="' + escapeHtml(notification.id) + '">' +
         '<span class="notification-item__icon" aria-hidden="true">🔔</span>' +
         '<div class="notification-item__body">' +
-          '<p class="notification-item__title">' + escapeHtml(n.title || "Notification") + '</p>' +
-          '<p class="notification-item__message">' + escapeHtml(n.message || "") + '</p>' +
-          '<p class="notification-item__time">' + escapeHtml(formatRelativeTime(n.created_at)) + '</p>' +
+          '<p class="notification-item__title">' + escapeHtml(notification.title || "Notification") + '</p>' +
+          '<p class="notification-item__message">' + escapeHtml(notification.message || "") + '</p>' +
+          '<p class="notification-item__time">' + escapeHtml(formatRelativeTime(notification.created_at)) + '</p>' +
         '</div>' +
-        (n.is_read ? "" : '<span class="notification-dot"></span>') +
+        (notification.is_read ? "" : '<span class="notification-dot" aria-label="Unread"></span>') +
       '</div>'
     );
   }
@@ -888,99 +1130,114 @@
           '<h2 class="search-panel__title">Where are you going?</h2>' +
           '<p class="search-panel__subtitle">Search real trips from participating operators.</p>' +
           '<form class="search-panel__form" id="search-form">' +
-            '<div class="search-panel__field"><label for="search-origin">From</label>' +
-              '<select id="search-origin"><option value="">Loading…</option></select></div>' +
-            '<div class="search-panel__field"><label for="search-destination">To</label>' +
-              '<select id="search-destination"><option value="">Loading…</option></select></div>' +
-            '<div class="search-panel__field"><label for="search-date">Date</label>' +
-              '<input type="date" id="search-date" /></div>' +
+            '<div class="search-panel__field">' +
+              '<label for="search-origin">From</label>' +
+              '<select id="search-origin"><option value="">Loading…</option></select>' +
+            '</div>' +
+            '<div class="search-panel__field">' +
+              '<label for="search-destination">To</label>' +
+              '<select id="search-destination"><option value="">Loading…</option></select>' +
+            '</div>' +
+            '<div class="search-panel__field">' +
+              '<label for="search-date">Date</label>' +
+              '<input type="date" id="search-date" />' +
+            '</div>' +
             '<div class="search-panel__actions">' +
               '<button type="submit" class="button button--primary button--block" id="search-submit">Search</button>' +
             '</div>' +
           '</form>' +
         '</section>' +
-        '<section class="card"><div class="card__header"><h3 class="card__title">Available buses</h3></div>' +
-        '<div class="card__body" id="search-results"></div></section>';
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Available buses</h3></div>' +
+          '<div class="card__body" id="search-results"></div>' +
+        '</section>';
 
       const originSelect = document.getElementById("search-origin");
       const destSelect = document.getElementById("search-destination");
       try {
         const routes = await Data.getRoutes(true);
         const origins = Array.from(new Set(routes.map(function (r) { return r.origin; }).filter(Boolean))).sort();
-        const dests = Array.from(new Set(routes.map(function (r) { return r.destination; }).filter(Boolean))).sort();
+        const destinations = Array.from(new Set(routes.map(function (r) { return r.destination; }).filter(Boolean))).sort();
+
         originSelect.innerHTML = '<option value="">Any origin</option>' +
           origins.map(function (o) { return '<option value="' + escapeHtml(o) + '">' + escapeHtml(o) + '</option>'; }).join("");
         destSelect.innerHTML = '<option value="">Any destination</option>' +
-          dests.map(function (d) { return '<option value="' + escapeHtml(d) + '">' + escapeHtml(d) + '</option>'; }).join("");
-      } catch (e) {
-        originSelect.innerHTML = '<option value="">Unable to load</option>';
-        destSelect.innerHTML = '<option value="">Unable to load</option>';
+          destinations.map(function (d) { return '<option value="' + escapeHtml(d) + '">' + escapeHtml(d) + '</option>'; }).join("");
+      } catch (err) {
+        originSelect.innerHTML = '<option value="">Unable to load routes</option>';
+        destSelect.innerHTML = '<option value="">Unable to load routes</option>';
       }
 
       const dateInput = document.getElementById("search-date");
       if (dateInput) dateInput.value = new Date().toISOString().slice(0, 10);
 
       const form = document.getElementById("search-form");
-      form.addEventListener("submit", function (e) {
-        e.preventDefault();
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
         performSearch();
       });
 
       async function performSearch() {
         const resultsEl = document.getElementById("search-results");
         renderLoading(resultsEl, "Finding available buses…");
+
         const origin = originSelect.value;
-        const dest = destSelect.value;
-        const dateVal = dateInput.value;
+        const destination = destSelect.value;
+        const dateValue = dateInput.value;
 
         try {
-          let from = null, to = null;
-          if (dateVal) {
-            from = new Date(dateVal + "T00:00:00").toISOString();
-            to = new Date(dateVal + "T23:59:59").toISOString();
+          let dateFrom = null, dateTo = null;
+          if (dateValue) {
+            dateFrom = new Date(dateValue + "T00:00:00").toISOString();
+            dateTo = new Date(dateValue + "T23:59:59").toISOString();
           }
-          let q = supabase.from("trips")
+
+          let query = supabase
+            .from("trips")
             .select("*, routes(id, origin, destination, estimated_minutes, base_fare), vehicles(id, registration_number, capacity, vehicle_type)")
             .in("status", ["scheduled", "boarding", "in_transit"])
-            .order("planned_departure");
-          if (from) q = q.gte("planned_departure", from);
-          if (to) q = q.lte("planned_departure", to);
-          const { data, error } = await q;
+            .order("planned_departure", { ascending: true });
+
+          if (dateFrom) query = query.gte("planned_departure", dateFrom);
+          if (dateTo) query = query.lte("planned_departure", dateTo);
+
+          const { data, error } = await query;
           if (error) throw error;
 
           let filtered = data || [];
           if (origin) filtered = filtered.filter(function (t) { return t.routes && t.routes.origin === origin; });
-          if (dest) filtered = filtered.filter(function (t) { return t.routes && t.routes.destination === dest; });
+          if (destination) filtered = filtered.filter(function (t) { return t.routes && t.routes.destination === destination; });
 
-          const enriched = await Promise.all(filtered.map(async function (t) {
-            const stats = await Data.getSeatStats(t.id, t.vehicles ? t.vehicles.capacity : 0);
-            return Object.assign({}, t, { seatStats: stats });
+          const enriched = await Promise.all(filtered.map(async function (trip) {
+            const stats = await Data.getSeatStats(trip.id, trip.vehicles ? trip.vehicles.capacity : 0);
+            return Object.assign({}, trip, { seatStats: stats });
           }));
 
-          if (!enriched.length) {
+          if (enriched.length === 0) {
             renderEmpty(resultsEl, {
-              icon: "🚌", title: "No buses found",
-              message: "No buses are currently available for this route."
+              icon: "🚌",
+              title: "No buses found",
+              message: "No buses are currently available for this route. Try a different date or destination."
             });
             return;
           }
 
           resultsEl.innerHTML = '<div class="trip-list">' + enriched.map(renderTripCard).join("") + '</div>';
 
-          resultsEl.querySelectorAll("[data-book-trip]").forEach(function (b) {
-            b.addEventListener("click", function () {
-              const t = enriched.find(function (x) { return x.id === b.getAttribute("data-book-trip"); });
-              if (t) openBookingModal(t);
+          resultsEl.querySelectorAll("[data-book-trip]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              const tripId = btn.getAttribute("data-book-trip");
+              const trip = enriched.find(function (t) { return t.id === tripId; });
+              if (trip) openBookingModal(trip);
             });
           });
-          resultsEl.querySelectorAll("[data-track-trip]").forEach(function (b) {
-            b.addEventListener("click", function () {
-              Router.go("track-trip", { tripId: b.getAttribute("data-track-trip") });
+
+          resultsEl.querySelectorAll("[data-track-trip]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              Router.go("track-trip", { tripId: btn.getAttribute("data-track-trip") });
             });
           });
-        } catch (e) {
-          renderError(resultsEl, e.message, performSearch);
-        }
+        } catch (err) { renderError(resultsEl, err.message, performSearch); }
       }
 
       performSearch();
@@ -992,25 +1249,33 @@
     const vehicle = trip.vehicles || {};
     const stats = trip.seatStats || { available: 0 };
     const status = trip.status || "scheduled";
-    const trackable = status === "in_transit" || status === "boarding";
+    const seatsLow = stats.available <= 3;
+    const isTrackable = status === "in_transit" || status === "boarding";
+
     return (
       '<article class="trip-card trip-card--' + escapeHtml(status) + '">' +
         '<div class="trip-card__identity">' +
           '<p class="trip-card__code">' + escapeHtml(trip.trip_code || "TC-???") + '</p>' +
-          '<p class="trip-card__vehicle">' + escapeHtml(vehicle.registration_number || "TBA") + '</p>' +
+          '<p class="trip-card__vehicle">' + escapeHtml(vehicle.registration_number || "Vehicle TBA") + '</p>' +
         '</div>' +
         '<div class="trip-card__route">' +
-          '<p class="trip-card__cities">' + escapeHtml(route.origin || "?") +
-            '<span class="trip-card__arrow">→</span>' + escapeHtml(route.destination || "?") + '</p>' +
-          '<p class="trip-card__stops">' + escapeHtml(route.estimated_minutes ? route.estimated_minutes + " min journey" : "") + '</p>' +
+          '<p class="trip-card__cities">' +
+            escapeHtml(route.origin || "?") +
+            '<span class="trip-card__arrow" aria-hidden="true">→</span>' +
+            escapeHtml(route.destination || "?") +
+          '</p>' +
+          '<p class="trip-card__stops">' +
+            escapeHtml(route.estimated_minutes ? route.estimated_minutes + " min journey" : "") +
+          '</p>' +
         '</div>' +
         '<div class="trip-card__timing">' +
           '<p class="trip-card__time">' + escapeHtml(formatTime(trip.planned_departure)) + '</p>' +
           '<p class="trip-card__date">' + escapeHtml(formatDate(trip.planned_departure)) + '</p>' +
         '</div>' +
         '<div class="trip-card__seats">' +
-          '<p class="trip-card__seats-value' + (stats.available <= 3 ? " trip-card__seats-value--low" : "") + '">' +
-            stats.available + '</p><p class="trip-card__seats-label">seats free</p>' +
+          '<p class="trip-card__seats-value' + (seatsLow ? " trip-card__seats-value--low" : "") + '">' +
+            stats.available + '</p>' +
+          '<p class="trip-card__seats-label">seats free</p>' +
         '</div>' +
         '<div class="trip-card__fare">' +
           '<p class="trip-card__fare-value">' + escapeHtml(formatCurrency(route.base_fare)) + '</p>' +
@@ -1018,7 +1283,9 @@
         '</div>' +
         '<div class="trip-card__actions">' +
           '<span class="badge badge--' + escapeHtml(status) + '">' + escapeHtml(humanizeStatus(status)) + '</span>' +
-          (trackable ? '<button type="button" class="button button--small button--ghost" data-track-trip="' + escapeHtml(trip.id) + '">Track</button>' : "") +
+          (isTrackable
+            ? '<button type="button" class="button button--small button--ghost" data-track-trip="' + escapeHtml(trip.id) + '">Track</button>'
+            : "") +
           (stats.available > 0 && (status === "scheduled" || status === "boarding")
             ? '<button type="button" class="button button--small button--primary" data-book-trip="' + escapeHtml(trip.id) + '">Book</button>'
             : '<span class="badge badge--cancelled">Full</span>') +
@@ -1034,95 +1301,135 @@
       footer:
         '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="confirm" id="modal-confirm-booking" disabled>Confirm booking</button>',
-      onAction: async function (a) {
-        if (a === "cancel") { Modal.close(); return; }
-        if (a === "confirm") await completeBooking(trip);
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        if (action === "confirm") await completeBooking(trip);
       }
     });
 
     const body = document.getElementById("modal-body");
     try {
-      const capacity = trip.vehicles ? trip.vehicles.capacity : 0;
-      if (!capacity) { body.innerHTML = '<p class="text-muted">No capacity configured.</p>'; return; }
+      const stats = await Data.getSeatStats(trip.id, trip.vehicles ? trip.vehicles.capacity : 0);
+      const capacity = stats.capacity || 0;
 
-      const { data: existing } = await supabase.from("bookings").select("seat_number, status")
-        .eq("trip_id", trip.id).in("status", ["reserved", "boarded"]);
-      const taken = {};
-      (existing || []).forEach(function (b) { taken[b.seat_number] = b.status; });
+      if (capacity === 0) {
+        body.innerHTML = '<p class="text-muted">Vehicle capacity is not configured.</p>';
+        return;
+      }
 
-      let html = '<div class="seat-legend">' +
+      const { data: existing } = await supabase
+        .from("bookings")
+        .select("seat_number, status")
+        .eq("trip_id", trip.id)
+        .in("status", ["reserved", "boarded"]);
+
+      const takenSeats = {};
+      (existing || []).forEach(function (b) { takenSeats[b.seat_number] = b.status; });
+
+      let seatsHtml = '<div class="seat-legend">' +
         '<span class="seat-legend__item"><span class="seat-legend__swatch seat-legend__swatch--available"></span> Available</span>' +
         '<span class="seat-legend__item"><span class="seat-legend__swatch seat-legend__swatch--reserved"></span> Reserved</span>' +
         '<span class="seat-legend__item"><span class="seat-legend__swatch seat-legend__swatch--boarded"></span> Boarded</span>' +
-        '</div><div class="seat-grid">';
+        '</div><div class="seat-grid" id="modal-seat-grid">';
 
       for (let i = 1; i <= capacity; i++) {
-        const st = taken[i];
-        let cls = "seat--available", label = "Free";
-        if (st === "reserved") { cls = "seat--reserved"; label = "Reserved"; }
-        if (st === "boarded") { cls = "seat--boarded"; label = "Boarded"; }
-        html += '<button type="button" class="seat ' + cls + '" data-seat="' + i + '"' + (st ? " disabled" : "") + '>' +
-          '<span class="seat__number">' + i + '</span><span class="seat__state">' + label + '</span></button>';
+        const status = takenSeats[i];
+        let cls = "seat--available";
+        let stateLabel = "Free";
+        if (status === "reserved") { cls = "seat--reserved"; stateLabel = "Reserved"; }
+        if (status === "boarded") { cls = "seat--boarded"; stateLabel = "Boarded"; }
+        seatsHtml +=
+          '<button type="button" class="seat ' + cls + '" data-seat="' + i + '" ' +
+            (status ? "disabled" : "") + '>' +
+            '<span class="seat__number">' + i + '</span>' +
+            '<span class="seat__state">' + stateLabel + '</span>' +
+          '</button>';
       }
-      html += '</div><p class="text-small text-muted mt-4" id="selected-seat-label">No seat selected.</p>';
+      seatsHtml += '</div>';
 
       body.innerHTML =
-        '<p class="text-muted mb-4">' + escapeHtml(trip.trip_code || "Trip") + ' · ' +
-          escapeHtml(trip.routes ? trip.routes.origin + " → " + trip.routes.destination : "") + '</p>' + html;
+        '<p class="text-muted mb-4">' +
+          escapeHtml(trip.trip_code || "Trip") + ' · ' +
+          escapeHtml(trip.routes ? trip.routes.origin + " → " + trip.routes.destination : "") +
+        '</p>' + seatsHtml +
+        '<p class="text-small text-muted mt-4" id="selected-seat-label">No seat selected.</p>';
 
-      let selected = null;
-      body.querySelectorAll(".seat--available").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          body.querySelectorAll(".seat--selected").forEach(function (x) { x.classList.remove("seat--selected"); });
-          btn.classList.add("seat--selected");
-          selected = Number(btn.getAttribute("data-seat"));
-          const lbl = document.getElementById("selected-seat-label");
-          if (lbl) lbl.textContent = "Selected seat: " + selected;
-          document.getElementById("modal-confirm-booking").disabled = false;
-          trip._selectedSeat = selected;
+      let selectedSeat = null;
+
+      body.querySelectorAll(".seat--available").forEach(function (seatBtn) {
+        seatBtn.addEventListener("click", function () {
+          body.querySelectorAll(".seat--selected").forEach(function (el) { el.classList.remove("seat--selected"); });
+          seatBtn.classList.add("seat--selected");
+          selectedSeat = Number(seatBtn.getAttribute("data-seat"));
+          const label = document.getElementById("selected-seat-label");
+          if (label) label.textContent = "Selected seat: " + selectedSeat;
+          const confirmBtn = document.getElementById("modal-confirm-booking");
+          if (confirmBtn) confirmBtn.disabled = false;
+          trip._selectedSeat = selectedSeat;
         });
       });
-    } catch (e) {
-      body.innerHTML = '<p class="text-muted">Unable to load seats.</p>';
+    } catch (err) {
+      body.innerHTML = '<p class="text-muted">Unable to load seats: ' + escapeHtml(err.message) + '</p>';
     }
   }
 
   async function completeBooking(trip) {
     const seat = trip._selectedSeat;
-    if (!seat) { Toast.warning("No seat selected"); return; }
+    if (!seat) { Toast.warning("No seat selected", "Please choose a seat before confirming."); return; }
+
     Loader.show("Processing booking…");
     try {
-      const { data: conflict } = await supabase.from("bookings").select("id")
-        .eq("trip_id", trip.id).eq("seat_number", seat).in("status", ["reserved", "boarded"]).maybeSingle();
+      const { data: conflict } = await supabase
+        .from("bookings")
+        .select("id")
+        .eq("trip_id", trip.id)
+        .eq("seat_number", seat)
+        .in("status", ["reserved", "boarded"])
+        .maybeSingle();
+
       if (conflict) {
         Modal.close();
-        Toast.error("Seat taken", "Please choose another.");
+        Toast.error("Seat taken", "That seat was just reserved by someone else. Please choose another.");
         return;
       }
-      const { data: booking, error } = await supabase.from("bookings").insert({
-        passenger_id: AppState.authUser.id,
-        trip_id: trip.id,
-        seat_number: seat,
-        status: "reserved",
-        fare: trip.routes ? trip.routes.base_fare : null
-      }).select().single();
-      if (error) throw error;
 
-      await supabase.from("tickets").insert({
+      const { data: booking, error: bookingError } = await supabase
+        .from("bookings")
+        .insert({
+          passenger_id: AppState.authUser.id,
+          trip_id: trip.id,
+          seat_number: seat,
+          status: "reserved",
+          fare: trip.routes ? trip.routes.base_fare : null
+        })
+        .select()
+        .single();
+      if (bookingError) throw bookingError;
+
+      const { error: ticketError } = await supabase.from("tickets").insert({
         booking_id: booking.id,
         ticket_code: generateTicketCode(),
         status: "valid"
       });
+      if (ticketError) throw ticketError;
 
-      await Data.logAudit("booking_created", "booking", booking.id, { seat: seat });
+      await Notifications.create({
+        recipient_id: AppState.authUser.id,
+        title: "Ticket confirmed",
+        message: "Your seat " + seat + " on " + (trip.trip_code || "the trip") + " is reserved.",
+        type: "ticket_confirmed",
+        related_entity: booking.id
+      });
+
+      await Data.logAudit("booking_created", "booking", booking.id, { trip_id: trip.id, seat: seat });
+
       Modal.close();
-      Toast.success("Booking confirmed", "Seat " + seat + " reserved.");
+      Toast.success("Booking confirmed", "Seat " + seat + " is reserved. View your ticket in the Tickets tab.");
       Router.go("tickets");
-    } catch (e) {
-      Toast.error("Booking failed", e.message);
-    } finally {
-      Loader.hide();
-    }
+    } catch (err) {
+      console.error("[TransitCare] Booking failed:", err);
+      Toast.error("Booking failed", err.message || "Please try again.");
+    } finally { Loader.hide(); }
   }
 
   Router.register("my-trips", {
@@ -1132,130 +1439,160 @@
       container.innerHTML = '<div id="my-trips-list"></div>';
       const list = document.getElementById("my-trips-list");
       renderLoading(list, "Loading your trips…");
+
       try {
-        const { data, error } = await supabase.from("bookings")
+        const { data, error } = await supabase
+          .from("bookings")
           .select("*, trips(*, routes(origin, destination), vehicles(registration_number))")
           .eq("passenger_id", AppState.authUser.id)
           .order("created_at", { ascending: false });
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🧭", title: "No trips yet", message: "Once you book a bus, your journeys will appear here." });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, {
+            icon: "🧭",
+            title: "No trips yet",
+            message: "Once you book a bus, your journeys will show up here."
+          });
           return;
         }
-        list.innerHTML = '<div class="card"><div class="card__body card__body--flush"><div class="list">' +
-          data.map(renderBookingRow).join("") + '</div></div></div>';
-      } catch (e) { renderError(list, e.message); }
+
+        list.innerHTML = '<div class="card"><div class="card__body card__body--flush">' +
+          '<div class="list">' + data.map(renderBookingRow).join("") + '</div>' +
+          '</div></div>';
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("tickets", {
     title: "My tickets",
-    subtitle: "Show these at boarding.",
+    subtitle: "Show these at boarding. Each ticket can only be used once.",
     render: async function (container) {
       container.innerHTML = '<div id="tickets-list"></div>';
       const list = document.getElementById("tickets-list");
       renderLoading(list, "Loading your tickets…");
+
       try {
-        const { data, error } = await supabase.from("bookings")
+        const { data, error } = await supabase
+          .from("bookings")
           .select("*, trips(*, routes(origin, destination), vehicles(registration_number)), tickets(*)")
           .eq("passenger_id", AppState.authUser.id)
           .order("created_at", { ascending: false });
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🎫", title: "No tickets yet", message: "Book a trip to receive a digital ticket." });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, {
+            icon: "🎫",
+            title: "No tickets yet",
+            message: "Book a trip to receive a digital ticket with a QR code."
+          });
           return;
         }
+
         list.innerHTML = '<div class="card-grid">' + data.map(renderTicketCard).join("") + '</div>';
-        data.forEach(function (b) {
-          const t = b.tickets && b.tickets[0];
-          if (t) renderQrForTicket(t.ticket_code, "qr-" + t.id);
+
+        data.forEach(function (booking) {
+          const ticket = booking.tickets && booking.tickets[0];
+          if (ticket) renderQrForTicket(ticket.ticket_code, "qr-" + ticket.id);
         });
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
-  function renderTicketCard(b) {
-    const trip = b.trips || {};
+  function renderTicketCard(booking) {
+    const trip = booking.trips || {};
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
-    const t = b.tickets && b.tickets[0];
+    const ticket = booking.tickets && booking.tickets[0];
+
     return (
       '<article class="ticket-card">' +
         '<header class="ticket-card__header">' +
           '<span class="ticket-card__brand">🚌 Eko TransitCare</span>' +
-          '<span class="ticket-card__status">' + escapeHtml(humanizeStatus(b.status)) + '</span>' +
+          '<span class="ticket-card__status">' + escapeHtml(humanizeStatus(booking.status)) + '</span>' +
         '</header>' +
         '<div class="ticket-card__body">' +
-          '<p class="ticket-card__route">' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+          '<p class="ticket-card__route">' +
+            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") +
+          '</p>' +
           '<dl class="ticket-card__details">' +
-            '<div class="ticket-card__detail"><dt>Ticket ID</dt><dd>' + escapeHtml(t ? t.ticket_code : "—") + '</dd></div>' +
+            '<div class="ticket-card__detail"><dt>Ticket ID</dt><dd>' + escapeHtml(ticket ? ticket.ticket_code : "—") + '</dd></div>' +
             '<div class="ticket-card__detail"><dt>Trip</dt><dd>' + escapeHtml(trip.trip_code || "—") + '</dd></div>' +
             '<div class="ticket-card__detail"><dt>Vehicle</dt><dd>' + escapeHtml(vehicle.registration_number || "—") + '</dd></div>' +
-            '<div class="ticket-card__detail"><dt>Seat</dt><dd>' + escapeHtml(b.seat_number || "—") + '</dd></div>' +
+            '<div class="ticket-card__detail"><dt>Seat</dt><dd>' + escapeHtml(booking.seat_number || "—") + '</dd></div>' +
             '<div class="ticket-card__detail"><dt>Departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
-            '<div class="ticket-card__detail"><dt>Fare</dt><dd>' + escapeHtml(formatCurrency(b.fare)) + '</dd></div>' +
+            '<div class="ticket-card__detail"><dt>Fare</dt><dd>' + escapeHtml(formatCurrency(booking.fare)) + '</dd></div>' +
           '</dl>' +
-          '<div class="ticket-card__qr"><div id="qr-' + escapeHtml(t ? t.id : "") + '"></div>' +
-            '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding.</p></div>' +
+          '<div class="ticket-card__qr">' +
+            '<div id="qr-' + escapeHtml(ticket ? ticket.id : "") + '"></div>' +
+            '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding.</p>' +
+          '</div>' +
         '</div>' +
       '</article>'
     );
   }
 
   async function renderQrForTicket(text, containerId) {
-    const c = document.getElementById(containerId);
-    if (!c) return;
+    const container = document.getElementById(containerId);
+    if (!container) return;
     try {
       await loadExternalScript(CDN.QRCODE);
       if (window.QRCode && window.QRCode.toCanvas) {
         const canvas = document.createElement("canvas");
-        c.appendChild(canvas);
+        container.appendChild(canvas);
         window.QRCode.toCanvas(canvas, text, { width: 168, margin: 1 }, function () {});
       } else {
-        c.innerHTML = '<p class="text-tiny text-muted">QR: ' + escapeHtml(text) + '</p>';
+        container.innerHTML = '<p class="text-tiny text-muted">QR code: ' + escapeHtml(text) + '</p>';
       }
-    } catch (e) {
-      c.innerHTML = '<p class="text-tiny text-muted">QR: ' + escapeHtml(text) + '</p>';
+    } catch (err) {
+      container.innerHTML = '<p class="text-tiny text-muted">QR code: ' + escapeHtml(text) + '</p>';
     }
   }
 
   Router.register("track-trip", {
     title: "Track your bus",
-    subtitle: "Live location updates.",
+    subtitle: "Live location updates from the driver's device.",
     render: async function (container, params) {
       const tripId = params.tripId;
       if (!tripId) {
         renderEmpty(container, { icon: "🚌", title: "No trip selected", message: "Open tracking from a search result." });
         return;
       }
+
       container.innerHTML =
-        '<section class="card"><div class="card__header">' +
-          '<h3 class="card__title" id="track-title">Loading…</h3>' +
-          '<span class="badge" id="track-status">—</span></div>' +
-          '<div class="card__body card__body--flush">' +
-            '<div class="map-container" id="track-map"><div class="map-placeholder">' +
-              '<span class="map-placeholder__icon">🗺️</span>Loading map…</div></div>' +
+        '<section class="card">' +
+          '<div class="card__header">' +
+            '<h3 class="card__title" id="track-title">Loading trip…</h3>' +
+            '<span class="badge" id="track-status">—</span>' +
           '</div>' +
-          '<div class="card__footer" id="track-details"></div></section>';
+          '<div class="card__body card__body--flush">' +
+            '<div class="map-container" id="track-map">' +
+              '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Loading map…</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="card__footer" id="track-details"></div>' +
+        '</section>';
 
       try {
-        const { data: trip, error } = await supabase.from("trips")
+        const { data: trip, error } = await supabase
+          .from("trips")
           .select("*, routes(*), vehicles(*), profiles!trips_driver_id_fkey(full_name)")
-          .eq("id", tripId).maybeSingle();
+          .eq("id", tripId)
+          .maybeSingle();
         if (error) throw error;
         if (!trip) {
-          renderEmpty(container, { icon: "🚌", title: "Trip not found", message: "" });
+          renderEmpty(container, { icon: "🚌", title: "Trip not found", message: "This trip may have been removed." });
           return;
         }
 
         setText("track-title", (trip.trip_code || "Trip") + " · " +
           (trip.routes ? trip.routes.origin + " → " + trip.routes.destination : ""));
-        const s = document.getElementById("track-status");
-        s.className = "badge badge--" + (trip.status || "scheduled");
-        s.textContent = humanizeStatus(trip.status);
+        const statusEl = document.getElementById("track-status");
+        statusEl.className = "badge badge--" + (trip.status || "scheduled");
+        statusEl.textContent = humanizeStatus(trip.status);
 
-        const det = document.getElementById("track-details");
-        det.innerHTML =
+        const detailsEl = document.getElementById("track-details");
+        detailsEl.innerHTML =
           '<dl class="detail-list">' +
             '<div><dt>Driver</dt><dd>' + escapeHtml(trip.profiles ? trip.profiles.full_name : "—") + '</dd></div>' +
             '<div><dt>Vehicle</dt><dd>' + escapeHtml(trip.vehicles ? trip.vehicles.registration_number : "—") + '</dd></div>' +
@@ -1265,71 +1602,108 @@
 
         await initTrackingMap(trip);
         subscribeToTripLocations(trip.id);
-      } catch (e) { renderError(container, e.message); }
+      } catch (err) { renderError(container, err.message); }
     }
   });
 
-  let trackMap = null, trackMarker = null;
+  let trackMapInstance = null;
+  let trackMarker = null;
 
   async function initTrackingMap(trip) {
-    const el = document.getElementById("track-map");
-    if (!el) return;
+    const mapEl = document.getElementById("track-map");
+    if (!mapEl) return;
+
     try {
       await loadStylesheet(CDN.LEAFLET_CSS);
       await loadExternalScript(CDN.LEAFLET_JS);
+
       if (!window.L) {
-        el.innerHTML = '<div class="map-placeholder">Map unavailable.</div>';
+        mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map library unavailable.</div>';
         return;
       }
-      el.innerHTML = "";
-      const c = TRANSITCARE_CONFIG.DEFAULT_MAP_CENTER;
-      trackMap = window.L.map(el).setView([c.lat, c.lng], TRANSITCARE_CONFIG.DEFAULT_MAP_ZOOM);
-      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "© OpenStreetMap", maxZoom: 19
-      }).addTo(trackMap);
 
-      const { data: locs } = await supabase.from("trip_locations").select("*")
-        .eq("trip_id", trip.id).order("recorded_at", { ascending: false }).limit(1);
-      if (locs && locs.length) {
-        const l = locs[0];
-        trackMarker = window.L.marker([l.latitude, l.longitude]).addTo(trackMap);
-        trackMap.setView([l.latitude, l.longitude], 14);
+      mapEl.innerHTML = "";
+      const center = TRANSITCARE_CONFIG.DEFAULT_MAP_CENTER;
+      trackMapInstance = window.L.map(mapEl).setView([center.lat, center.lng], TRANSITCARE_CONFIG.DEFAULT_MAP_ZOOM);
+
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
+        maxZoom: 19
+      }).addTo(trackMapInstance);
+
+      const { data: locations } = await supabase
+        .from("trip_locations")
+        .select("*")
+        .eq("trip_id", trip.id)
+        .order("recorded_at", { ascending: false })
+        .limit(1);
+
+      if (locations && locations.length > 0) {
+        const loc = locations[0];
+        updateTrackMarker(loc.latitude, loc.longitude, loc.recorded_at);
       } else {
-        el.insertAdjacentHTML("beforeend",
+        mapEl.insertAdjacentHTML(
+          "beforeend",
           '<div class="map-overlay"><span class="map-overlay__label">Awaiting GPS signal</span>' +
-          '<span class="map-overlay__value">No location yet.</span></div>');
+          '<span class="map-overlay__value">The driver has not started sharing location yet.</span></div>'
+        );
       }
-    } catch (e) {
-      el.innerHTML = '<div class="map-placeholder">Map unavailable.</div>';
+    } catch (err) {
+      mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable. ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function updateTrackMarker(lat, lng, recordedAt) {
+    if (!trackMapInstance || !window.L) return;
+    if (!trackMarker) {
+      trackMarker = window.L.marker([lat, lng]).addTo(trackMapInstance);
+    } else {
+      trackMarker.setLatLng([lat, lng]);
+    }
+    trackMapInstance.setView([lat, lng], trackMapInstance.getZoom() || 14);
+
+    const mapEl = document.getElementById("track-map");
+    if (mapEl) {
+      let overlay = mapEl.querySelector(".map-overlay");
+      const age = Date.now() - new Date(recordedAt).getTime();
+      const stale = age > TRANSITCARE_CONFIG.GPS_STALE_THRESHOLD_MS;
+      const ageText = formatRelativeTime(recordedAt);
+
+      const overlayHtml =
+        '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
+          '<span class="map-overlay__label">' + (stale ? "GPS signal may be unavailable" : "Live location") + '</span>' +
+          '<span class="map-overlay__value">Last updated ' + escapeHtml(ageText) + '</span>' +
+        '</div>';
+
+      if (overlay) overlay.outerHTML = overlayHtml;
+      else mapEl.insertAdjacentHTML("beforeend", overlayHtml);
     }
   }
 
   function subscribeToTripLocations(tripId) {
     if (!supabase) return;
-    stopChannel("tripLocations");
+    stopRealtimeChannel("tripLocations");
+
     AppState.channels.tripLocations = supabase
-      .channel("trip-loc-" + tripId)
+      .channel("trip-locations-" + tripId)
       .on("postgres_changes", {
         event: "INSERT", schema: "public",
         table: "trip_locations", filter: "trip_id=eq." + tripId
-      }, function (p) {
-        const l = p.new;
-        if (!l || !trackMap || !window.L) return;
-        if (!trackMarker) trackMarker = window.L.marker([l.latitude, l.longitude]).addTo(trackMap);
-        else trackMarker.setLatLng([l.latitude, l.longitude]);
-        trackMap.setView([l.latitude, l.longitude], 14);
+      }, function (payload) {
+        const loc = payload.new;
+        if (loc) updateTrackMarker(loc.latitude, loc.longitude, loc.recorded_at);
       })
       .subscribe();
   }
 
   Router.register("notifications", {
     title: "Notifications",
-    subtitle: "Trip updates and reminders.",
-    headerActions: '<button type="button" class="button button--ghost button--small" id="mark-all-read">Mark all read</button>',
+    subtitle: "Trip reminders, ticket updates and seat releases.",
+    headerActions: '<button type="button" class="button button--ghost button--small" id="mark-all-read">Mark all as read</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="notifications-list"></div></div>';
       const list = document.getElementById("notifications-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading notifications…");
 
       const markAll = document.getElementById("mark-all-read");
       if (markAll) {
@@ -1337,20 +1711,25 @@
           try {
             await supabase.from("notifications").update({ is_read: true })
               .eq("recipient_id", AppState.authUser.id).eq("is_read", false);
-            Toast.success("All marked as read");
+            Toast.success("All notifications marked as read");
             Router.go("notifications");
-            refreshBadge();
-          } catch (e) { Toast.error("Unable", e.message); }
+            refreshNotificationBadge();
+          } catch (err) { Toast.error("Unable to mark as read", err.message); }
         });
       }
 
       try {
-        const list_data = await Notifications.fetch();
-        if (!list_data || !list_data.length) {
-          renderEmpty(list, { icon: "🔔", title: "No notifications yet", message: "Trip reminders will appear here." });
+        const notifications = await Notifications.fetch();
+        if (!notifications || notifications.length === 0) {
+          renderEmpty(list, {
+            icon: "🔔",
+            title: "No notifications yet",
+            message: "You will be notified when a bus is available, your ticket is confirmed, or a seat is released."
+          });
           return;
         }
-        list.innerHTML = list_data.map(renderNotificationRow).join("");
+        list.innerHTML = notifications.map(renderNotificationRow).join("");
+
         list.querySelectorAll(".notification-item--unread").forEach(function (item) {
           item.addEventListener("click", async function () {
             const id = item.getAttribute("data-notification-id");
@@ -1358,62 +1737,68 @@
             try {
               await supabase.from("notifications").update({ is_read: true }).eq("id", id);
               item.classList.remove("notification-item--unread");
-              const d = item.querySelector(".notification-dot");
-              if (d) d.remove();
-              refreshBadge();
-            } catch (e) {}
+              const dot = item.querySelector(".notification-dot");
+              if (dot) dot.remove();
+              refreshNotificationBadge();
+            } catch (err) { /* silent */ }
           });
         });
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("profile", {
     title: "My profile",
-    subtitle: "Your account details.",
+    subtitle: "Your account details and preferences.",
     render: async function (container) {
-      const p = AppState.profile || {};
+      const profile = AppState.profile || {};
       container.innerHTML =
-        '<section class="card"><div class="card__body">' +
-          '<div class="flex items-center gap-4">' +
-            '<span class="avatar avatar--large">' + escapeHtml(getInitials(p.full_name)) + '</span>' +
-            '<div>' +
-              '<h2 style="font-size:18px;font-weight:800;">' + escapeHtml(p.full_name || "—") + '</h2>' +
-              '<p class="text-muted text-small">' + escapeHtml(p.email || "") + '</p>' +
-              '<span class="badge badge--' + escapeHtml(p.status || "active") + ' mt-2">' +
-                escapeHtml(humanizeStatus(p.status || "active")) + '</span>' +
+        '<section class="card">' +
+          '<div class="card__body">' +
+            '<div class="flex items-center gap-4">' +
+              '<span class="avatar avatar--large">' + escapeHtml(getInitials(profile.full_name)) + '</span>' +
+              '<div>' +
+                '<h2 style="font-size:18px;font-weight:800;">' + escapeHtml(profile.full_name || "—") + '</h2>' +
+                '<p class="text-muted text-small">' + escapeHtml(profile.email || "") + '</p>' +
+                '<span class="badge badge--' + escapeHtml(profile.status || "active") + ' mt-2">' +
+                  escapeHtml(humanizeStatus(profile.status || "active")) + '</span>' +
+              '</div>' +
             '</div>' +
           '</div>' +
-        '</div></section>' +
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Account details</h3></div>' +
+          '<div class="card__body">' +
+            '<form id="profile-form">' +
+              '<div class="field"><label for="profile-name">Full name</label>' +
+                '<input type="text" id="profile-name" value="' + escapeHtml(profile.full_name || "") + '" /></div>' +
+              '<div class="field"><label for="profile-phone">Phone number</label>' +
+                '<input type="tel" id="profile-phone" value="' + escapeHtml(profile.phone || "") + '" /></div>' +
+              '<div class="field"><label for="profile-email">Email address</label>' +
+                '<input type="email" id="profile-email" value="' + escapeHtml(profile.email || "") + '" disabled />' +
+                '<p class="field__hint">Email changes require verification.</p></div>' +
+              '<div class="form-actions"><button type="submit" class="button button--primary">Save changes</button></div>' +
+            '</form>' +
+          '</div>' +
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Session</h3></div>' +
+          '<div class="card__body"><button type="button" class="button button--danger" id="profile-signout">Sign out</button></div>' +
+        '</section>';
 
-        '<section class="card"><div class="card__header"><h3 class="card__title">Account details</h3></div>' +
-        '<div class="card__body">' +
-          '<form id="profile-form">' +
-            '<div class="field"><label for="profile-name">Full name</label>' +
-              '<input type="text" id="profile-name" value="' + escapeHtml(p.full_name || "") + '" /></div>' +
-            '<div class="field"><label for="profile-phone">Phone</label>' +
-              '<input type="tel" id="profile-phone" value="' + escapeHtml(p.phone || "") + '" /></div>' +
-            '<div class="field"><label for="profile-email">Email</label>' +
-              '<input type="email" id="profile-email" value="' + escapeHtml(p.email || "") + '" disabled /></div>' +
-            '<div class="form-actions"><button type="submit" class="button button--primary">Save changes</button></div>' +
-          '</form>' +
-        '</div></section>' +
-
-        '<section class="card"><div class="card__header"><h3 class="card__title">Session</h3></div>' +
-        '<div class="card__body"><button type="button" class="button button--danger" id="profile-signout">Sign out</button></div></section>';
-
-      document.getElementById("profile-form").addEventListener("submit", async function (e) {
-        e.preventDefault();
+      document.getElementById("profile-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
         const name = document.getElementById("profile-name").value.trim();
         const phone = document.getElementById("profile-phone").value.trim();
         if (!name) { Toast.warning("Name required"); return; }
+
         Loader.show("Saving…");
         try {
           const updated = await Profile.update(AppState.authUser.id, { full_name: name, phone: phone || null });
           AppState.profile = updated || AppState.profile;
           updateHeaderUser();
           Toast.success("Profile updated");
-        } catch (e) { Toast.error("Unable to save", e.message); }
+        } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
       });
 
@@ -1421,124 +1806,164 @@
     }
   });
 
+
   /* =======================================================================
      15. DRIVER VIEWS
      ======================================================================= */
+
   Router.register("driver-dashboard", {
     title: "Driver dashboard",
-    subtitle: "Your assigned vehicle and trips.",
+    subtitle: "Your assigned vehicle, terminal and upcoming trips.",
     render: async function (container) {
-      const p = AppState.profile || {};
-      const approved = p.status === "approved";
+      const profile = AppState.profile || {};
+      const approved = profile.status === "approved";
+
       container.innerHTML =
-        (!approved ? '<div class="alert alert--warning"><strong>Account not approved.</strong>' +
-          '<span>An administrator must approve your account. Current status: ' + escapeHtml(humanizeStatus(p.status)) + '.</span></div>' : "") +
+        (!approved
+          ? '<div class="alert alert--warning">' +
+              '<strong>Account not yet approved.</strong>' +
+              '<span>An administrator must approve your account before you can operate trips. ' +
+              'Current status: ' + escapeHtml(humanizeStatus(profile.status)) + '.</span>' +
+            '</div>'
+          : "") +
         '<section class="stat-grid" id="driver-stats"></section>' +
-        '<section class="card"><div class="card__header"><h3 class="card__title">Assigned vehicle</h3></div>' +
-        '<div class="card__body" id="driver-vehicle">Loading…</div></section>' +
-        '<section class="card"><div class="card__header"><h3 class="card__title">Recent trips</h3></div>' +
-        '<div class="card__body card__body--flush" id="driver-recent-trips">Loading…</div></section>';
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Assigned vehicle</h3></div>' +
+          '<div class="card__body" id="driver-vehicle">Loading…</div>' +
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Your recent trips</h3></div>' +
+          '<div class="card__body card__body--flush" id="driver-recent-trips">Loading…</div>' +
+        '</section>';
 
       try {
         const { data: trips } = await supabase.from("trips").select("status").eq("driver_id", AppState.authUser.id);
         const total = (trips || []).length;
         const active = (trips || []).filter(function (t) { return t.status === "in_transit"; }).length;
-        const done = (trips || []).filter(function (t) { return t.status === "completed"; }).length;
+        const completed = (trips || []).filter(function (t) { return t.status === "completed"; }).length;
         document.getElementById("driver-stats").innerHTML =
           statCard("🧭", total, "Total trips", "info") +
           statCard("🚌", active, "Active now", "success") +
-          statCard("✅", done, "Completed", "success");
-      } catch (e) {}
+          statCard("✅", completed, "Completed", "success");
+      } catch (err) { /* ignore */ }
 
-      const vEl = document.getElementById("driver-vehicle");
+      const vehicleEl = document.getElementById("driver-vehicle");
       try {
-        const { data: vs } = await supabase.from("vehicles").select("*").eq("assigned_driver_id", AppState.authUser.id);
-        if (!vs || !vs.length) {
-          vEl.innerHTML = '<p class="text-muted">No vehicle assigned yet.</p>';
+        const { data: vehicles } = await supabase.from("vehicles").select("*").eq("assigned_driver_id", AppState.authUser.id);
+        if (!vehicles || vehicles.length === 0) {
+          vehicleEl.innerHTML = '<p class="text-muted">No vehicle assigned yet. Please contact an administrator.</p>';
         } else {
-          const v = vs[0];
-          vEl.innerHTML = '<dl class="detail-list">' +
-            '<div><dt>Registration</dt><dd>' + escapeHtml(v.registration_number || "—") + '</dd></div>' +
-            '<div><dt>Type</dt><dd>' + escapeHtml(v.vehicle_type || "—") + '</dd></div>' +
-            '<div><dt>Capacity</dt><dd>' + escapeHtml(v.capacity || "—") + ' seats</dd></div>' +
-            '<div><dt>Status</dt><dd><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
-              escapeHtml(humanizeStatus(v.status || "active")) + '</span></dd></div></dl>';
+          const v = vehicles[0];
+          vehicleEl.innerHTML =
+            '<dl class="detail-list">' +
+              '<div><dt>Registration</dt><dd>' + escapeHtml(v.registration_number || "—") + '</dd></div>' +
+              '<div><dt>Type</dt><dd>' + escapeHtml(v.vehicle_type || "—") + '</dd></div>' +
+              '<div><dt>Capacity</dt><dd>' + escapeHtml(v.capacity || "—") + ' seats</dd></div>' +
+              '<div><dt>Status</dt><dd><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
+                escapeHtml(humanizeStatus(v.status || "active")) + '</span></dd></div>' +
+            '</dl>';
         }
-      } catch (e) { vEl.innerHTML = '<p class="text-muted">Unable to load vehicle.</p>'; }
+      } catch (err) { vehicleEl.innerHTML = '<p class="text-muted">Unable to load vehicle.</p>'; }
 
-      const tEl = document.getElementById("driver-recent-trips");
+      const tripsEl = document.getElementById("driver-recent-trips");
       try {
-        const { data: ts } = await supabase.from("trips")
+        const { data: trips } = await supabase
+          .from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
-          .eq("driver_id", AppState.authUser.id).order("created_at", { ascending: false }).limit(5);
-        if (!ts || !ts.length) {
-          renderEmpty(tEl, { icon: "🧭", title: "No trips yet", message: "Create your first trip from Make Bus Available." });
+          .eq("driver_id", AppState.authUser.id)
+          .order("created_at", { ascending: false })
+          .limit(5);
+        if (!trips || trips.length === 0) {
+          renderEmpty(tripsEl, { icon: "🧭", title: "No trips yet", message: "Create your first trip from Make Bus Available." });
         } else {
-          tEl.innerHTML = '<div class="list">' + ts.map(renderDriverTripRow).join("") + '</div>';
+          tripsEl.innerHTML = '<div class="list">' + trips.map(renderDriverTripRow).join("") + '</div>';
         }
-      } catch (e) { renderError(tEl, e.message); }
+      } catch (err) { renderError(tripsEl, err.message); }
     }
   });
 
   function statCard(icon, value, label, variant) {
-    return '<article class="stat-card"><span class="stat-card__icon stat-card__icon--' + (variant || "") +
-      '" aria-hidden="true">' + icon + '</span><div class="stat-card__body">' +
-      '<p class="stat-card__value">' + escapeHtml(value) + '</p>' +
-      '<p class="stat-card__label">' + escapeHtml(label) + '</p></div></article>';
+    return (
+      '<article class="stat-card">' +
+        '<span class="stat-card__icon stat-card__icon--' + (variant || "") + '" aria-hidden="true">' + icon + '</span>' +
+        '<div class="stat-card__body">' +
+          '<p class="stat-card__value">' + escapeHtml(value) + '</p>' +
+          '<p class="stat-card__label">' + escapeHtml(label) + '</p>' +
+        '</div>' +
+      '</article>'
+    );
   }
 
   function renderDriverTripRow(trip) {
-    const r = trip.routes || {};
-    return '<div class="list__item"><div class="list__main">' +
-      '<p class="list__title">' + escapeHtml(trip.trip_code || "—") + ' · ' +
-        escapeHtml(r.origin || "?") + ' → ' + escapeHtml(r.destination || "?") + '</p>' +
-      '<p class="list__meta">' + escapeHtml(formatDateTime(trip.planned_departure)) + '</p></div>' +
-      '<span class="badge badge--' + escapeHtml(trip.status || "scheduled") + '">' +
-        escapeHtml(humanizeStatus(trip.status)) + '</span></div>';
+    const route = trip.routes || {};
+    return (
+      '<div class="list__item">' +
+        '<div class="list__main">' +
+          '<p class="list__title">' + escapeHtml(trip.trip_code || "—") + ' · ' +
+            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+          '<p class="list__meta">' + escapeHtml(formatDateTime(trip.planned_departure)) + '</p>' +
+        '</div>' +
+        '<span class="badge badge--' + escapeHtml(trip.status || "scheduled") + '">' +
+          escapeHtml(humanizeStatus(trip.status)) + '</span>' +
+      '</div>'
+    );
   }
 
   Router.register("make-bus-available", {
     title: "Make bus available",
-    subtitle: "Publish a trip for passengers.",
+    subtitle: "Publish a trip so passengers can see and book it.",
     render: async function (container) {
       if (!AppState.profile || AppState.profile.status !== "approved") {
-        renderEmpty(container, { icon: "🔒", title: "Account not approved", message: "You must be approved to publish trips." });
+        renderEmpty(container, { icon: "🔒", title: "Account not approved", message: "You must be an approved driver to publish trips." });
         return;
       }
-      container.innerHTML =
-        '<section class="card"><div class="card__header"><h3 class="card__title">Trip details</h3></div>' +
-        '<div class="card__body"><form id="trip-form">' +
-          '<div class="form-grid">' +
-            '<div class="field"><label for="trip-vehicle">Vehicle</label>' +
-              '<select id="trip-vehicle" required><option value="">Loading…</option></select></div>' +
-            '<div class="field"><label for="trip-route">Route</label>' +
-              '<select id="trip-route" required><option value="">Loading…</option></select></div>' +
-            '<div class="field"><label for="trip-terminal">Terminal</label>' +
-              '<select id="trip-terminal"><option value="">Loading…</option></select></div>' +
-            '<div class="field"><label for="trip-departure">Planned departure</label>' +
-              '<input type="datetime-local" id="trip-departure" required /></div>' +
-          '</div>' +
-          '<div class="form-actions"><button type="submit" class="button button--primary">Make bus available</button></div>' +
-        '</form></div></section>';
 
-      const vSel = document.getElementById("trip-vehicle");
-      const rSel = document.getElementById("trip-route");
-      const tSel = document.getElementById("trip-terminal");
+      container.innerHTML =
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Trip details</h3></div>' +
+          '<div class="card__body">' +
+            '<form id="trip-form">' +
+              '<div class="form-grid">' +
+                '<div class="field"><label for="trip-vehicle">Vehicle</label>' +
+                  '<select id="trip-vehicle" required><option value="">Loading…</option></select></div>' +
+                '<div class="field"><label for="trip-route">Route</label>' +
+                  '<select id="trip-route" required><option value="">Loading…</option></select></div>' +
+                '<div class="field"><label for="trip-terminal">Terminal</label>' +
+                  '<select id="trip-terminal"><option value="">Loading…</option></select></div>' +
+                '<div class="field"><label for="trip-departure">Planned departure</label>' +
+                  '<input type="datetime-local" id="trip-departure" required /></div>' +
+              '</div>' +
+              '<div class="form-actions"><button type="submit" class="button button--primary">Make bus available</button></div>' +
+            '</form>' +
+          '</div>' +
+        '</section>';
+
+      const vehicleSelect = document.getElementById("trip-vehicle");
+      const routeSelect = document.getElementById("trip-route");
+      const terminalSelect = document.getElementById("trip-terminal");
+
       try {
         const [vehicles, routes, terminals] = await Promise.all([
           Data.getVehicles(),
           Data.getRoutes(true),
           Data.getTerminals(true)
         ]);
-        const mine = vehicles.filter(function (v) { return v.assigned_driver_id === AppState.authUser.id; });
-        vSel.innerHTML = '<option value="">Select a vehicle</option>' +
-          (mine.map(function (v) { return '<option value="' + escapeHtml(v.id) + '">' + escapeHtml(v.registration_number) + ' (' + escapeHtml(v.capacity) + ' seats)</option>'; }).join("") ||
-            '<option value="">No vehicle assigned</option>');
-        rSel.innerHTML = '<option value="">Select a route</option>' +
-          routes.map(function (r) { return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.origin) + ' → ' + escapeHtml(r.destination) + '</option>'; }).join("");
-        tSel.innerHTML = '<option value="">Select a terminal</option>' +
+
+        const myVehicles = vehicles.filter(function (v) { return v.assigned_driver_id === AppState.authUser.id; });
+
+        vehicleSelect.innerHTML = '<option value="">Select a vehicle</option>' +
+          (myVehicles.map(function (v) {
+            return '<option value="' + escapeHtml(v.id) + '">' + escapeHtml(v.registration_number) + ' (' + escapeHtml(v.capacity) + ' seats)</option>';
+          }).join("") || '<option value="">No vehicle assigned</option>');
+
+        routeSelect.innerHTML = '<option value="">Select a route</option>' +
+          routes.map(function (r) {
+            return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.origin) + ' → ' + escapeHtml(r.destination) + '</option>';
+          }).join("");
+
+        terminalSelect.innerHTML = '<option value="">Select a terminal</option>' +
           terminals.map(function (t) { return '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>'; }).join("");
-      } catch (e) { Toast.error("Unable to load form data", e.message); }
+      } catch (err) { Toast.error("Unable to load form data", err.message); }
 
       const depInput = document.getElementById("trip-departure");
       if (depInput) {
@@ -1546,26 +1971,35 @@
         depInput.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
       }
 
-      document.getElementById("trip-form").addEventListener("submit", async function (e) {
-        e.preventDefault();
-        const vid = vSel.value, rid = rSel.value, tid = tSel.value, dep = depInput.value;
-        if (!vid || !rid || !dep) { Toast.warning("Missing fields", "Please fill all required fields."); return; }
+      document.getElementById("trip-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const vehicleId = vehicleSelect.value;
+        const routeId = routeSelect.value;
+        const terminalId = terminalSelect.value;
+        const departureLocal = depInput.value;
+
+        if (!vehicleId || !routeId || !departureLocal) {
+          Toast.warning("Missing fields", "Please select a vehicle, route and departure time.");
+          return;
+        }
+
         Loader.show("Creating trip…");
         try {
           const { data, error } = await supabase.from("trips").insert({
             trip_code: generateTripCode(),
             driver_id: AppState.authUser.id,
-            vehicle_id: vid,
-            route_id: rid,
-            terminal_id: tid || null,
-            planned_departure: new Date(dep).toISOString(),
+            vehicle_id: vehicleId,
+            route_id: routeId,
+            terminal_id: terminalId || null,
+            planned_departure: new Date(departureLocal).toISOString(),
             status: "scheduled"
           }).select().single();
           if (error) throw error;
-          await Data.logAudit("trip_created", "trip", data.id, { route_id: rid });
-          Toast.success("Bus is now available");
+
+          await Data.logAudit("trip_created", "trip", data.id, { route_id: routeId });
+          Toast.success("Bus is now available", "Passengers can now see and book this trip.");
           Router.go("driver-trips");
-        } catch (e) { Toast.error("Unable to create trip", e.message); }
+        } catch (err) { Toast.error("Unable to create trip", err.message); }
         finally { Loader.hide(); }
       });
     }
@@ -1573,55 +2007,72 @@
 
   Router.register("active-trip", {
     title: "Active trip",
-    subtitle: "Start, track and end your trip.",
+    subtitle: "Start, track and end your current trip.",
     render: async function (container) {
       container.innerHTML = '<div id="active-trip-root"></div>';
       const root = document.getElementById("active-trip-root");
       renderLoading(root, "Loading active trip…");
+
       try {
-        const { data: trips, error } = await supabase.from("trips")
+        const { data: trips, error } = await supabase
+          .from("trips")
           .select("*, routes(*), vehicles(*), terminals(name)")
           .eq("driver_id", AppState.authUser.id)
           .in("status", ["scheduled", "boarding", "in_transit"])
-          .order("planned_departure").limit(1);
+          .order("planned_departure", { ascending: true })
+          .limit(1);
         if (error) throw error;
-        if (!trips || !trips.length) {
-          renderEmpty(root, { icon: "🚌", title: "No active trip", message: "Create a trip from Make Bus Available." });
+
+        if (!trips || trips.length === 0) {
+          renderEmpty(root, { icon: "🚌", title: "No active trip", message: "Create a trip from Make Bus Available to get started." });
           return;
         }
-        renderActiveTrip(root, trips[0]);
-      } catch (e) { renderError(root, e.message); }
+
+        const trip = trips[0];
+        AppState.activeTrip = trip;
+        renderActiveTrip(root, trip);
+      } catch (err) { renderError(root, err.message); }
     }
   });
 
   function renderActiveTrip(root, trip) {
-    const r = trip.routes || {};
-    const v = trip.vehicles || {};
-    const t = trip.terminals || {};
+    const route = trip.routes || {};
+    const vehicle = trip.vehicles || {};
+    const terminal = trip.terminals || {};
+
     root.innerHTML =
-      '<section class="card"><div class="card__header">' +
-        '<h3 class="card__title">' + escapeHtml(trip.trip_code || "Trip") + '</h3>' +
-        '<span class="badge badge--' + escapeHtml(trip.status) + '">' + escapeHtml(humanizeStatus(trip.status)) + '</span></div>' +
-        '<div class="card__body"><dl class="detail-list">' +
-          '<div><dt>Route</dt><dd>' + escapeHtml(r.origin || "?") + ' → ' + escapeHtml(r.destination || "?") + '</dd></div>' +
-          '<div><dt>Vehicle</dt><dd>' + escapeHtml(v.registration_number || "—") + '</dd></div>' +
-          '<div><dt>Terminal</dt><dd>' + escapeHtml(t.name || "—") + '</dd></div>' +
-          '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
-          '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
-        '</dl></div>' +
-        '<div class="card__footer"><div class="button-group" id="trip-actions"></div></div></section>' +
+      '<section class="card">' +
+        '<div class="card__header">' +
+          '<h3 class="card__title">' + escapeHtml(trip.trip_code || "Trip") + '</h3>' +
+          '<span class="badge badge--' + escapeHtml(trip.status) + '">' + escapeHtml(humanizeStatus(trip.status)) + '</span>' +
+        '</div>' +
+        '<div class="card__body">' +
+          '<dl class="detail-list">' +
+            '<div><dt>Route</dt><dd>' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</dd></div>' +
+            '<div><dt>Vehicle</dt><dd>' + escapeHtml(vehicle.registration_number || "—") + '</dd></div>' +
+            '<div><dt>Terminal</dt><dd>' + escapeHtml(terminal.name || "—") + '</dd></div>' +
+            '<div><dt>Planned departure</dt><dd>' + escapeHtml(formatDateTime(trip.planned_departure)) + '</dd></div>' +
+            '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
+          '</dl>' +
+        '</div>' +
+        '<div class="card__footer"><div class="button-group" id="trip-actions"></div></div>' +
+      '</section>' +
       '<section class="card" id="gps-card" style="display:none;">' +
         '<div class="card__header"><h3 class="card__title">GPS tracking</h3>' +
-        '<span class="badge badge--in_transit" id="gps-status">Starting…</span></div>' +
-        '<div class="card__body"><p class="text-muted" id="gps-message">Waiting…</p></div></section>';
+          '<span class="badge badge--in_transit" id="gps-status">Starting…</span>' +
+        '</div>' +
+        '<div class="card__body"><p class="text-muted" id="gps-message">Waiting for location…</p></div>' +
+      '</section>';
 
-    const a = document.getElementById("trip-actions");
+    const actions = document.getElementById("trip-actions");
+
     if (trip.status === "scheduled") {
-      a.innerHTML = '<button type="button" class="button button--primary" id="start-trip-button">▶ Start trip</button>';
+      actions.innerHTML = '<button type="button" class="button button--primary" id="start-trip-button">▶ Start trip</button>';
       document.getElementById("start-trip-button").addEventListener("click", function () { startTrip(trip); });
     } else if (trip.status === "boarding" || trip.status === "in_transit") {
-      a.innerHTML = '<button type="button" class="button button--danger" id="end-trip-button">⏹ End trip</button>';
+      actions.innerHTML = '<button type="button" class="button button--danger" id="end-trip-button">⏹ End trip</button>';
       document.getElementById("end-trip-button").addEventListener("click", function () { endTrip(trip); });
+
       if (trip.status === "in_transit") {
         document.getElementById("gps-card").style.display = "";
         startGpsWatch(trip);
@@ -1636,27 +2087,51 @@
         status: "in_transit", actual_departure: nowIso()
       }).eq("id", trip.id);
       if (error) throw error;
+
       await Data.logAudit("trip_started", "trip", trip.id, null);
-      Toast.success("Trip started");
+
+      const { data: bookings } = await supabase.from("bookings").select("passenger_id")
+        .eq("trip_id", trip.id).eq("status", "reserved");
+
+      if (bookings && bookings.length) {
+        for (const b of bookings) {
+          await Notifications.create({
+            recipient_id: b.passenger_id,
+            title: "Trip started",
+            message: "Bus " + (trip.trip_code || "") + " has departed. Track it live.",
+            type: "trip_started",
+            related_entity: trip.id
+          });
+        }
+      }
+
+      Toast.success("Trip started", "GPS tracking will begin shortly.");
       Router.go("active-trip");
-    } catch (e) { Toast.error("Unable to start trip", e.message); }
+    } catch (err) { Toast.error("Unable to start trip", err.message); }
     finally { Loader.hide(); }
   }
 
   async function endTrip(trip) {
-    const ok = await Modal.confirm({ title: "End trip?", message: "This marks the trip as completed.", confirmLabel: "End", danger: true });
-    if (!ok) return;
+    const confirmed = await Modal.confirm({
+      title: "End trip?",
+      message: "This will mark the trip as completed and stop GPS tracking.",
+      confirmLabel: "End trip",
+      danger: true
+    });
+    if (!confirmed) return;
+
     Loader.show("Ending trip…");
     try {
       const { error } = await supabase.from("trips").update({
         status: "completed", actual_arrival: nowIso()
       }).eq("id", trip.id);
       if (error) throw error;
+
       stopGpsWatch();
       await Data.logAudit("trip_ended", "trip", trip.id, null);
       Toast.success("Trip completed");
       Router.go("driver-trips");
-    } catch (e) { Toast.error("Unable to end trip", e.message); }
+    } catch (err) { Toast.error("Unable to end trip", err.message); }
     finally { Loader.hide(); }
   }
 
@@ -1667,118 +2142,155 @@
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="driver-trips-list"></div></div>';
       const list = document.getElementById("driver-trips-list");
       renderLoading(list, "Loading trips…");
+
       try {
-        const { data, error } = await supabase.from("trips")
+        const { data, error } = await supabase
+          .from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
-          .eq("driver_id", AppState.authUser.id).order("planned_departure", { ascending: false });
+          .eq("driver_id", AppState.authUser.id)
+          .order("planned_departure", { ascending: false });
         if (error) throw error;
-        if (!data || !data.length) {
+
+        if (!data || data.length === 0) {
           renderEmpty(list, { icon: "🧭", title: "No trips yet", message: "Create your first trip from Make Bus Available." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(renderDriverTripRow).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("scan-ticket", {
     title: "Scan ticket",
-    subtitle: "Validate a passenger's QR ticket.",
+    subtitle: "Validate a passenger's QR ticket against the database.",
     render: async function (container) {
       container.innerHTML =
-        '<section class="card"><div class="card__header"><h3 class="card__title">Ticket code</h3></div>' +
-        '<div class="card__body"><div class="field">' +
-          '<label for="ticket-code-input">Ticket code</label>' +
-          '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" /></div>' +
-          '<button type="button" class="button button--primary" id="validate-ticket-button">Validate ticket</button>' +
-        '</div></section><div id="scan-result"></div>';
+        '<section class="card">' +
+          '<div class="card__header"><h3 class="card__title">Ticket code</h3></div>' +
+          '<div class="card__body">' +
+            '<div class="field">' +
+              '<label for="ticket-code-input">Enter or scan the ticket code</label>' +
+              '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" />' +
+            '</div>' +
+            '<button type="button" class="button button--primary" id="validate-ticket-button">Validate ticket</button>' +
+          '</div>' +
+        '</section>' +
+        '<div id="scan-result"></div>';
 
       const input = document.getElementById("ticket-code-input");
-      const btn = document.getElementById("validate-ticket-button");
+      const button = document.getElementById("validate-ticket-button");
       const resultEl = document.getElementById("scan-result");
 
       async function validate() {
         const code = input.value.trim().toUpperCase();
         if (!code) { Toast.warning("Enter a ticket code"); return; }
+
         renderLoading(resultEl, "Validating…");
         try {
-          const { data: ticket, error } = await supabase.from("tickets")
+          const { data: ticket, error } = await supabase
+            .from("tickets")
             .select("*, bookings(*, trips(*, routes(origin, destination)))")
-            .eq("ticket_code", code).maybeSingle();
+            .eq("ticket_code", code)
+            .maybeSingle();
           if (error) throw error;
+
           if (!ticket) {
-            resultEl.innerHTML = scannerResult("invalid", "✕", "Invalid ticket", "No ticket with this code.");
+            resultEl.innerHTML = scannerResult("invalid", "✕", "Invalid ticket", "No ticket with this code exists.");
             return;
           }
-          const b = ticket.bookings || {};
+
+          const booking = ticket.bookings || {};
+
           if (ticket.status === "used") {
-            resultEl.innerHTML = scannerResult("used", "⚠", "Ticket already used", "Scanned at " + formatDateTime(ticket.used_at));
+            resultEl.innerHTML = scannerResult("used", "⚠", "Ticket already used", "Scanned on " + formatDateTime(ticket.used_at) + ".");
             return;
           }
+
           if (ticket.status === "cancelled") {
-            resultEl.innerHTML = scannerResult("invalid", "✕", "Cancelled ticket", "");
+            resultEl.innerHTML = scannerResult("invalid", "✕", "Ticket cancelled", "This ticket has been cancelled.");
             return;
           }
-          await supabase.from("tickets").update({ status: "used", used_at: nowIso() }).eq("id", ticket.id);
-          await supabase.from("bookings").update({ status: "boarded" }).eq("id", b.id);
-          await Data.logAudit("ticket_scanned", "ticket", ticket.id, { booking_id: b.id });
+
+          const { error: updateError } = await supabase.from("tickets")
+            .update({ status: "used", used_at: nowIso() }).eq("id", ticket.id);
+          if (updateError) throw updateError;
+
+          await supabase.from("bookings").update({ status: "boarded" }).eq("id", booking.id);
+          await Data.logAudit("ticket_scanned", "ticket", ticket.id, { booking_id: booking.id });
+
           resultEl.innerHTML = scannerResult("valid", "✓", "Valid ticket",
-            "Seat " + escapeHtml(b.seat_number || "—") + " · " +
-            escapeHtml(b.trips ? b.trips.routes.origin + " → " + b.trips.routes.destination : ""));
+            "Seat " + escapeHtml(booking.seat_number || "—") + " · " +
+            escapeHtml(booking.trips ? booking.trips.routes.origin + " → " + booking.trips.routes.destination : ""));
           input.value = "";
-        } catch (e) { Toast.error("Validation failed", e.message); }
+        } catch (err) {
+          Toast.error("Validation failed", err.message);
+          resultEl.innerHTML = "";
+        }
       }
 
-      btn.addEventListener("click", validate);
-      input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); validate(); } });
+      button.addEventListener("click", validate);
+      input.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { event.preventDefault(); validate(); }
+      });
     }
   });
 
-  function scannerResult(type, icon, title, msg) {
-    return '<div class="scanner-result scanner-result--' + type + '">' +
-      '<span class="scanner-result__icon" aria-hidden="true">' + icon + '</span>' +
-      '<p class="scanner-result__title">' + escapeHtml(title) + '</p>' +
-      '<p class="scanner-result__message">' + escapeHtml(msg) + '</p></div>';
+  function scannerResult(type, icon, title, message) {
+    return (
+      '<div class="scanner-result scanner-result--' + type + '">' +
+        '<span class="scanner-result__icon" aria-hidden="true">' + icon + '</span>' +
+        '<p class="scanner-result__title">' + escapeHtml(title) + '</p>' +
+        '<p class="scanner-result__message">' + escapeHtml(message) + '</p>' +
+      '</div>'
+    );
   }
+
 
   /* =======================================================================
      16. OPERATOR VIEWS
      ======================================================================= */
+
   Router.register("operator-dashboard", {
     title: "Operator dashboard",
     subtitle: "Your fleet at a glance.",
     render: async function (container) {
-      const oid = AppState.profile ? AppState.profile.operator_id : null;
+      const operatorId = AppState.profile ? AppState.profile.operator_id : null;
       container.innerHTML = '<section class="stat-grid" id="operator-stats"></section>';
+
       try {
-        const [v, d, t] = await Promise.all([
-          supabase.from("vehicles").select("id").eq("operator_id", oid),
-          supabase.from("profiles").select("id").eq("operator_id", oid).eq("role", "driver"),
+        const [vehicles, drivers, trips] = await Promise.all([
+          supabase.from("vehicles").select("id").eq("operator_id", operatorId),
+          supabase.from("profiles").select("id").eq("operator_id", operatorId).eq("role", "driver"),
           supabase.from("trips").select("id")
         ]);
+
         document.getElementById("operator-stats").innerHTML =
-          statCard("🚌", (v.data || []).length, "Vehicles", "") +
-          statCard("👨‍✈️", (d.data || []).length, "Drivers", "info") +
-          statCard("🧭", (t.data || []).length, "Trips", "success");
-      } catch (e) { renderError(container, e.message); }
+          statCard("🚌", (vehicles.data || []).length, "Vehicles", "") +
+          statCard("👨‍✈️", (drivers.data || []).length, "Drivers", "info") +
+          statCard("🧭", (trips.data || []).length, "Trips", "success");
+      } catch (err) { renderError(container, err.message); }
     }
   });
 
   Router.register("operator-fleet", {
     title: "Fleet",
-    subtitle: "Your vehicles.",
+    subtitle: "Vehicles registered under your operator account.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="fleet-list"></div></div>';
       const list = document.getElementById("fleet-list");
       renderLoading(list, "Loading fleet…");
+
       try {
         const { data, error } = await supabase.from("vehicles").select("*")
-          .eq("operator_id", AppState.profile.operator_id).order("registration_number");
+          .eq("operator_id", AppState.profile.operator_id)
+          .order("registration_number", { ascending: true });
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "No vehicles are registered under your operator." });
           return;
         }
+
         list.innerHTML = '<div class="list">' + data.map(function (v) {
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(v.registration_number) + '</p>' +
@@ -1786,25 +2298,28 @@
             '<span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
               escapeHtml(humanizeStatus(v.status || "active")) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("operator-drivers", {
     title: "Drivers",
-    subtitle: "Your drivers.",
+    subtitle: "Drivers registered under your operator.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="op-drivers-list"></div></div>';
       const list = document.getElementById("op-drivers-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading drivers…");
+
       try {
         const { data, error } = await supabase.from("profiles").select("*")
           .eq("operator_id", AppState.profile.operator_id).eq("role", "driver");
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "No drivers are associated with your operator." });
           return;
         }
+
         list.innerHTML = '<div class="list">' + data.map(function (d) {
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(d.full_name || "—") + '</p>' +
@@ -1812,176 +2327,200 @@
             '<span class="badge badge--' + escapeHtml(d.status || "pending") + '">' +
               escapeHtml(humanizeStatus(d.status || "pending")) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("operator-trips", {
     title: "Trips",
-    subtitle: "Trips from your fleet.",
+    subtitle: "Trips operated by your fleet.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="op-trips-list"></div></div>';
       const list = document.getElementById("op-trips-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading trips…");
+
       try {
         const { data, error } = await supabase.from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
           .order("planned_departure", { ascending: false }).limit(50);
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🧭", title: "No trips", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🧭", title: "No trips", message: "No trips recorded yet." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(renderDriverTripRow).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
+
 
   /* =======================================================================
      17. ADMIN VIEWS
      ======================================================================= */
+
   Router.register("admin-dashboard", {
     title: "Admin dashboard",
     subtitle: "Platform overview.",
     render: async function (container) {
-      container.innerHTML =
-        '<section class="stat-grid" id="admin-stats"></section>' +
+      container.innerHTML = '<section class="stat-grid" id="admin-stats"></section>' +
         '<section class="card"><div class="card__header"><h3 class="card__title">Recent audit activity</h3></div>' +
         '<div class="card__body" id="admin-audit"></div></section>';
+
       try {
-        const [profiles, drivers, operators, vehicles, terminals, routes, trips, bookings] = await Promise.all([
-          supabase.from("profiles").select("id"),
+        const [profilesRes, driversRes, operatorsRes, vehiclesRes, terminalsRes, routesRes, tripsRes, bookingsRes] = await Promise.all([
+          supabase.from("profiles").select("id, role"),
           supabase.from("profiles").select("id, status").eq("role", "driver"),
           supabase.from("operators").select("id"),
           supabase.from("vehicles").select("id"),
           supabase.from("terminals").select("id"),
           supabase.from("routes").select("id"),
-          supabase.from("trips").select("id"),
+          supabase.from("trips").select("id, status"),
           supabase.from("bookings").select("id")
         ]);
-        const ds = drivers.data || [];
-        const approved = ds.filter(function (d) { return d.status === "approved"; }).length;
-        const pending = ds.filter(function (d) { return d.status !== "approved" && d.status !== "rejected"; }).length;
+
+        const drivers = driversRes.data || [];
+        const approved = drivers.filter(function (d) { return d.status === "approved"; }).length;
+        const pending = drivers.filter(function (d) { return d.status !== "approved" && d.status !== "rejected"; }).length;
+
         document.getElementById("admin-stats").innerHTML =
-          statCard("👥", (profiles.data || []).length, "Users", "info") +
-          statCard("👨‍✈️", ds.length, "Drivers", "") +
-          statCard("✅", approved, "Approved", "success") +
-          statCard("⏳", pending, "Pending", "accent") +
-          statCard("🏢", (operators.data || []).length, "Operators", "") +
-          statCard("🚌", (vehicles.data || []).length, "Vehicles", "") +
-          statCard("📍", (terminals.data || []).length, "Terminals", "") +
-          statCard("🗺️", (routes.data || []).length, "Routes", "") +
-          statCard("🧭", (trips.data || []).length, "Trips", "info") +
-          statCard("🎫", (bookings.data || []).length, "Bookings", "success");
-      } catch (e) { renderError(container, e.message); return; }
+          statCard("👥", (profilesRes.data || []).length, "Total users", "info") +
+          statCard("👨‍✈️", drivers.length, "Drivers", "") +
+          statCard("✅", approved, "Approved drivers", "success") +
+          statCard("⏳", pending, "Pending approval", "accent") +
+          statCard("🏢", (operatorsRes.data || []).length, "Operators", "") +
+          statCard("🚌", (vehiclesRes.data || []).length, "Vehicles", "") +
+          statCard("📍", (terminalsRes.data || []).length, "Terminals", "") +
+          statCard("🗺️", (routesRes.data || []).length, "Routes", "") +
+          statCard("🧭", (tripsRes.data || []).length, "Trips", "info") +
+          statCard("🎫", (bookingsRes.data || []).length, "Bookings", "success");
+      } catch (err) { renderError(container, err.message); return; }
 
       const auditEl = document.getElementById("admin-audit");
       try {
         const { data: logs } = await supabase.from("audit_logs").select("*")
           .order("created_at", { ascending: false }).limit(10);
-        if (!logs || !logs.length) {
-          renderEmpty(auditEl, { icon: "📝", title: "No activity yet", message: "" });
+        if (!logs || logs.length === 0) {
+          renderEmpty(auditEl, { icon: "📝", title: "No activity yet", message: "Admin actions will be logged here." });
         } else {
-          auditEl.innerHTML = logs.map(function (l) {
+          auditEl.innerHTML = logs.map(function (log) {
             return '<div class="audit-entry">' +
-              '<span class="audit-entry__time">' + escapeHtml(formatDateTime(l.created_at)) + '</span>' +
-              '<span class="audit-entry__text">' + escapeHtml(l.action || "") +
-                (l.entity_type ? ' · ' + escapeHtml(l.entity_type) : "") + '</span></div>';
+              '<span class="audit-entry__time">' + escapeHtml(formatDateTime(log.created_at)) + '</span>' +
+              '<span class="audit-entry__text">' + escapeHtml(log.action || "action") +
+                (log.entity_type ? ' · ' + escapeHtml(log.entity_type) : "") + '</span></div>';
           }).join("");
         }
-      } catch (e) {}
+      } catch (err) { /* silent */ }
     }
   });
 
   Router.register("admin-users", {
     title: "Users",
-    subtitle: "All accounts.",
+    subtitle: "All registered accounts.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="users-list"></div></div>';
       const list = document.getElementById("users-list");
       renderLoading(list, "Loading users…");
+
       try {
         const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "👥", title: "No users", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "👥", title: "No users", message: "No accounts registered yet." });
           return;
         }
+
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
           '<thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>' +
           data.map(function (u) {
             return '<tr><td>' + escapeHtml(u.full_name || "—") + '</td>' +
               '<td>' + escapeHtml(u.email || "—") + '</td>' +
-              '<td><span class="badge">' + escapeHtml(humanizeStatus(u.role || "")) + '</span></td>' +
+              '<td><span class="badge">' + escapeHtml(humanizeStatus(u.role || "—")) + '</span></td>' +
               '<td><span class="badge badge--' + escapeHtml(u.status || "active") + '">' +
                 escapeHtml(humanizeStatus(u.status || "active")) + '</span></td></tr>';
           }).join("") + '</tbody></table></div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("admin-drivers", {
     title: "Driver approval",
-    subtitle: "Approve or reject drivers.",
+    subtitle: "Review and approve driver accounts.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="drivers-list"></div></div>';
       const list = document.getElementById("drivers-list");
       renderLoading(list, "Loading drivers…");
+
       try {
         const { data, error } = await supabase.from("profiles").select("*")
           .eq("role", "driver").order("created_at", { ascending: false });
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "No driver accounts have been registered." });
           return;
         }
+
         list.innerHTML = '<div class="list">' + data.map(function (d) {
+          const actions = '<div class="list__actions">' +
+            (d.status !== "approved" ? '<button type="button" class="button button--small button--success" data-approve="' + escapeHtml(d.id) + '">Approve</button>' : "") +
+            (d.status !== "rejected" ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>' : "") +
+            '</div>';
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(d.full_name || "—") + '</p>' +
             '<p class="list__meta">' + escapeHtml(d.email || "") + ' · ' + escapeHtml(humanizeStatus(d.status || "pending")) + '</p></div>' +
-            '<div class="list__actions">' +
-              (d.status !== "approved" ? '<button type="button" class="button button--small button--success" data-approve="' + escapeHtml(d.id) + '">Approve</button>' : "") +
-              (d.status !== "rejected" ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>' : "") +
-            '</div></div>';
+            actions + '</div>';
         }).join("") + '</div>';
 
-        list.querySelectorAll("[data-approve]").forEach(function (b) {
-          b.addEventListener("click", function () { updateDriverStatus(b.getAttribute("data-approve"), "approved"); });
+        list.querySelectorAll("[data-approve]").forEach(function (btn) {
+          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-approve"), "approved"); });
         });
-        list.querySelectorAll("[data-reject]").forEach(function (b) {
-          b.addEventListener("click", function () { updateDriverStatus(b.getAttribute("data-reject"), "rejected"); });
+        list.querySelectorAll("[data-reject]").forEach(function (btn) {
+          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-reject"), "rejected"); });
         });
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
-  async function updateDriverStatus(id, status) {
+  async function updateDriverStatus(driverId, status) {
     Loader.show("Updating…");
     try {
-      const { error } = await supabase.from("profiles").update({ status: status }).eq("id", id);
+      const { error } = await supabase.from("profiles").update({ status: status }).eq("id", driverId);
       if (error) throw error;
-      await Data.logAudit("driver_" + status, "profile", id, null);
+
+      await Data.logAudit("driver_" + status, "profile", driverId, null);
+
+      await Notifications.create({
+        recipient_id: driverId,
+        title: "Account " + status,
+        message: "Your driver account has been " + status + ".",
+        type: "driver_status",
+        related_entity: driverId
+      });
+
       Toast.success("Driver " + status);
       Router.go("admin-drivers");
-    } catch (e) { Toast.error("Unable", e.message); }
+    } catch (err) { Toast.error("Unable to update driver", err.message); }
     finally { Loader.hide(); }
   }
 
   Router.register("admin-operators", {
     title: "Operators",
-    subtitle: "Transport companies.",
+    subtitle: "Transport companies on the platform.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-operator">+ Add operator</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="operators-list"></div></div>';
       const list = document.getElementById("operators-list");
-      renderLoading(list, "Loading…");
-      const add = document.getElementById("add-operator");
-      if (add) add.addEventListener("click", openAddOperatorModal);
+      renderLoading(list, "Loading operators…");
+
+      const addBtn = document.getElementById("add-operator");
+      if (addBtn) addBtn.addEventListener("click", openAddOperatorModal);
+
       try {
-        const { data, error } = await supabase.from("operators").select("*").order("name");
-        if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🏢", title: "No operators", message: "" });
+        const data = await Data.getOperators();
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🏢", title: "No operators", message: "Add your first transport operator." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(function (o) {
@@ -1991,21 +2530,21 @@
             '<span class="badge badge--' + escapeHtml(o.status || "active") + '">' +
               escapeHtml(humanizeStatus(o.status || "active")) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   function openAddOperatorModal() {
     Modal.open({
       title: "Add operator",
-      body: '<div class="field"><label for="op-name">Name</label><input type="text" id="op-name" /></div>' +
-        '<div class="field"><label for="op-contact">Contact</label><input type="text" id="op-contact" /></div>' +
+      body: '<div class="field"><label for="op-name">Operator name</label><input type="text" id="op-name" /></div>' +
+        '<div class="field"><label for="op-contact">Contact name</label><input type="text" id="op-contact" /></div>' +
         '<div class="field"><label for="op-phone">Phone</label><input type="tel" id="op-phone" /></div>' +
         '<div class="field"><label for="op-email">Email</label><input type="email" id="op-email" /></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
-      onAction: async function (a) {
-        if (a === "cancel") { Modal.close(); return; }
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
         const name = document.getElementById("op-name").value.trim();
         if (!name) { Toast.warning("Name required"); return; }
         Loader.show("Saving…");
@@ -2021,26 +2560,32 @@
           Modal.close();
           Toast.success("Operator added");
           Router.go("admin-operators");
-        } catch (e) { Toast.error("Unable", e.message); }
+        } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
       }
     });
   }
 
+
+  /* =======================================================================
+     18. TERMINAL MANAGEMENT
+     ======================================================================= */
   Router.register("admin-terminals", {
     title: "Terminals",
-    subtitle: "Boarding points.",
+    subtitle: "Boarding points across the network.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-terminal">+ Add terminal</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="terminals-list"></div></div>';
       const list = document.getElementById("terminals-list");
-      renderLoading(list, "Loading…");
-      const add = document.getElementById("add-terminal");
-      if (add) add.addEventListener("click", openAddTerminalModal);
+      renderLoading(list, "Loading terminals…");
+
+      const addBtn = document.getElementById("add-terminal");
+      if (addBtn) addBtn.addEventListener("click", openAddTerminalModal);
+
       try {
         const data = await Data.getTerminals();
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "📍", title: "No terminals", message: "" });
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "📍", title: "No terminals", message: "Add your first terminal." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(function (t) {
@@ -2050,21 +2595,21 @@
             '<span class="badge badge--' + escapeHtml(t.status || "active") + '">' +
               escapeHtml(humanizeStatus(t.status || "active")) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   function openAddTerminalModal() {
     Modal.open({
       title: "Add terminal",
-      body: '<div class="field"><label for="term-name">Name</label><input type="text" id="term-name" /></div>' +
+      body: '<div class="field"><label for="term-name">Terminal name</label><input type="text" id="term-name" /></div>' +
         '<div class="field"><label for="term-location">Location</label><input type="text" id="term-location" /></div>' +
         '<div class="field"><label for="term-desc">Description</label><textarea id="term-desc"></textarea></div>' +
-        '<div class="field"><label for="term-contact">Contact</label><input type="text" id="term-contact" /></div>',
+        '<div class="field"><label for="term-contact">Contact information</label><input type="text" id="term-contact" /></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
-      onAction: async function (a) {
-        if (a === "cancel") { Modal.close(); return; }
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
         const name = document.getElementById("term-name").value.trim();
         if (!name) { Toast.warning("Name required"); return; }
         Loader.show("Saving…");
@@ -2077,29 +2622,36 @@
             status: "active"
           });
           if (error) throw error;
+          AppState.cache.terminals = null;
           Modal.close();
           Toast.success("Terminal added");
           Router.go("admin-terminals");
-        } catch (e) { Toast.error("Unable", e.message); }
+        } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
       }
     });
   }
 
+
+  /* =======================================================================
+     19. ROUTE MANAGEMENT
+     ======================================================================= */
   Router.register("admin-routes", {
     title: "Routes",
-    subtitle: "Origins, destinations, fares.",
+    subtitle: "Origins, destinations and fares.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-route">+ Add route</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="routes-list"></div></div>';
       const list = document.getElementById("routes-list");
-      renderLoading(list, "Loading…");
-      const add = document.getElementById("add-route");
-      if (add) add.addEventListener("click", openAddRouteModal);
+      renderLoading(list, "Loading routes…");
+
+      const addBtn = document.getElementById("add-route");
+      if (addBtn) addBtn.addEventListener("click", openAddRouteModal);
+
       try {
         const data = await Data.getRoutes();
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🗺️", title: "No routes", message: "" });
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🗺️", title: "No routes", message: "Add your first route." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(function (r) {
@@ -2111,7 +2663,7 @@
             '<span class="badge badge--' + escapeHtml(r.status || "active") + '">' +
               escapeHtml(humanizeStatus(r.status || "active")) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
@@ -2124,29 +2676,35 @@
         '<div class="field"><label for="route-minutes">Estimated minutes</label><input type="number" id="route-minutes" min="1" /></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
-      onAction: async function (a) {
-        if (a === "cancel") { Modal.close(); return; }
-        const o = document.getElementById("route-origin").value.trim();
-        const d = document.getElementById("route-destination").value.trim();
-        if (!o || !d) { Toast.warning("Origin and destination required"); return; }
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const origin = document.getElementById("route-origin").value.trim();
+        const destination = document.getElementById("route-destination").value.trim();
+        if (!origin || !destination) { Toast.warning("Origin and destination required"); return; }
         Loader.show("Saving…");
         try {
           const { error } = await supabase.from("routes").insert({
-            origin: o, destination: d,
+            origin: origin,
+            destination: destination,
             base_fare: Number(document.getElementById("route-fare").value) || null,
             estimated_minutes: Number(document.getElementById("route-minutes").value) || null,
             status: "active"
           });
           if (error) throw error;
+          AppState.cache.routes = null;
           Modal.close();
           Toast.success("Route added");
           Router.go("admin-routes");
-        } catch (e) { Toast.error("Unable", e.message); }
+        } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
       }
     });
   }
 
+
+  /* =======================================================================
+     20. VEHICLE MANAGEMENT
+     ======================================================================= */
   Router.register("admin-vehicles", {
     title: "Vehicles",
     subtitle: "All registered vehicles.",
@@ -2154,17 +2712,19 @@
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="vehicles-list"></div></div>';
       const list = document.getElementById("vehicles-list");
-      renderLoading(list, "Loading…");
-      const add = document.getElementById("add-vehicle");
-      if (add) add.addEventListener("click", openAddVehicleModal);
+      renderLoading(list, "Loading vehicles…");
+
+      const addBtn = document.getElementById("add-vehicle");
+      if (addBtn) addBtn.addEventListener("click", openAddVehicleModal);
+
       try {
         const data = await Data.getVehicles();
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "" });
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "Add your first vehicle." });
           return;
         }
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-          '<thead><tr><th>Reg</th><th>Type</th><th>Capacity</th><th>Status</th></tr></thead><tbody>' +
+          '<thead><tr><th>Registration</th><th>Type</th><th>Capacity</th><th>Status</th></tr></thead><tbody>' +
           data.map(function (v) {
             return '<tr><td>' + escapeHtml(v.registration_number) + '</td>' +
               '<td>' + escapeHtml(v.vehicle_type || "—") + '</td>' +
@@ -2172,29 +2732,29 @@
               '<td><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
                 escapeHtml(humanizeStatus(v.status || "active")) + '</span></td></tr>';
           }).join("") + '</tbody></table></div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   function openAddVehicleModal() {
     Modal.open({
       title: "Add vehicle",
-      body: '<div class="field"><label for="veh-reg">Registration</label><input type="text" id="veh-reg" /></div>' +
-        '<div class="field"><label for="veh-type">Type</label><input type="text" id="veh-type" placeholder="Bus, Danfo…" /></div>' +
+      body: '<div class="field"><label for="veh-reg">Registration number</label><input type="text" id="veh-reg" /></div>' +
+        '<div class="field"><label for="veh-type">Vehicle type</label><input type="text" id="veh-type" placeholder="e.g. Bus, Danfo" /></div>' +
         '<div class="field"><label for="veh-capacity">Capacity</label><input type="number" id="veh-capacity" min="1" /></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
-      onAction: async function (a) {
-        if (a === "cancel") { Modal.close(); return; }
-        const r = document.getElementById("veh-reg").value.trim();
-        const c = Number(document.getElementById("veh-capacity").value);
-        if (!r || !c) { Toast.warning("Registration and capacity required"); return; }
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const reg = document.getElementById("veh-reg").value.trim();
+        const capacity = Number(document.getElementById("veh-capacity").value);
+        if (!reg || !capacity) { Toast.warning("Registration and capacity required"); return; }
         Loader.show("Saving…");
         try {
           const { error } = await supabase.from("vehicles").insert({
-            registration_number: r,
+            registration_number: reg,
             vehicle_type: document.getElementById("veh-type").value.trim() || null,
-            capacity: c,
+            capacity: capacity,
             status: "active",
             verification_status: "verified"
           });
@@ -2202,41 +2762,48 @@
           Modal.close();
           Toast.success("Vehicle added");
           Router.go("admin-vehicles");
-        } catch (e) { Toast.error("Unable", e.message); }
+        } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
       }
     });
   }
 
+
+  /* =======================================================================
+     21. TRIP MANAGEMENT (ADMIN)
+     ======================================================================= */
   Router.register("admin-trips", {
     title: "Trips",
-    subtitle: "All trips.",
+    subtitle: "All trips on the platform.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="admin-trips-list"></div></div>';
       const list = document.getElementById("admin-trips-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading trips…");
+
       try {
         const { data, error } = await supabase.from("trips")
           .select("*, routes(origin, destination), vehicles(registration_number)")
           .order("planned_departure", { ascending: false }).limit(100);
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🧭", title: "No trips", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🧭", title: "No trips", message: "No trips recorded yet." });
           return;
         }
+
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
           '<thead><tr><th>Code</th><th>Route</th><th>Vehicle</th><th>Departure</th><th>Status</th></tr></thead><tbody>' +
           data.map(function (t) {
-            const r = t.routes || {};
-            const v = t.vehicles || {};
+            const route = t.routes || {};
+            const vehicle = t.vehicles || {};
             return '<tr><td>' + escapeHtml(t.trip_code || "—") + '</td>' +
-              '<td>' + escapeHtml(r.origin || "?") + ' → ' + escapeHtml(r.destination || "?") + '</td>' +
-              '<td>' + escapeHtml(v.registration_number || "—") + '</td>' +
+              '<td>' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</td>' +
+              '<td>' + escapeHtml(vehicle.registration_number || "—") + '</td>' +
               '<td>' + escapeHtml(formatDateTime(t.planned_departure)) + '</td>' +
               '<td><span class="badge badge--' + escapeHtml(t.status || "scheduled") + '">' +
                 escapeHtml(humanizeStatus(t.status)) + '</span></td></tr>';
           }).join("") + '</tbody></table></div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
@@ -2246,48 +2813,55 @@
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="admin-tickets-list"></div></div>';
       const list = document.getElementById("admin-tickets-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading tickets…");
+
       try {
         const { data, error } = await supabase.from("tickets")
-          .select("*, bookings(seat_number, trips(trip_code, routes(origin, destination)))")
+          .select("*, bookings(seat_number, passenger_id, trips(trip_code, routes(origin, destination)))")
           .order("issued_at", { ascending: false }).limit(100);
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "🎫", title: "No tickets", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🎫", title: "No tickets", message: "No tickets have been issued yet." });
           return;
         }
+
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-          '<thead><tr><th>Ticket</th><th>Trip</th><th>Seat</th><th>Status</th></tr></thead><tbody>' +
+          '<thead><tr><th>Ticket</th><th>Trip</th><th>Seat</th><th>Status</th><th>Issued</th></tr></thead><tbody>' +
           data.map(function (t) {
-            const b = t.bookings || {};
-            const tr = b.trips || {};
-            const r = tr.routes || {};
+            const booking = t.bookings || {};
+            const trip = booking.trips || {};
+            const route = trip.routes || {};
             return '<tr><td class="text-mono">' + escapeHtml(t.ticket_code) + '</td>' +
-              '<td>' + escapeHtml(tr.trip_code || "—") + '<br /><span class="text-tiny text-muted">' +
-                escapeHtml(r.origin || "?") + ' → ' + escapeHtml(r.destination || "?") + '</span></td>' +
-              '<td>' + escapeHtml(b.seat_number || "—") + '</td>' +
+              '<td>' + escapeHtml(trip.trip_code || "—") + '<br /><span class="text-tiny text-muted">' +
+                escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</span></td>' +
+              '<td>' + escapeHtml(booking.seat_number || "—") + '</td>' +
               '<td><span class="badge badge--' + escapeHtml(t.status || "valid") + '">' +
-                escapeHtml(humanizeStatus(t.status || "valid")) + '</span></td></tr>';
+                escapeHtml(humanizeStatus(t.status || "valid")) + '</span></td>' +
+              '<td>' + escapeHtml(formatDateTime(t.issued_at)) + '</td></tr>';
           }).join("") + '</tbody></table></div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("admin-feedback", {
     title: "Feedback",
-    subtitle: "Passenger ratings.",
+    subtitle: "Passenger ratings and comments.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="feedback-list"></div></div>';
       const list = document.getElementById("feedback-list");
-      renderLoading(list, "Loading…");
+      renderLoading(list, "Loading feedback…");
+
       try {
         const { data, error } = await supabase.from("feedback")
           .select("*, trips(trip_code)").order("created_at", { ascending: false }).limit(50);
         if (error) throw error;
-        if (!data || !data.length) {
-          renderEmpty(list, { icon: "⭐", title: "No feedback yet", message: "" });
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "⭐", title: "No feedback yet", message: "Passenger feedback will appear here." });
           return;
         }
+
         list.innerHTML = '<div class="list">' + data.map(function (f) {
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(f.overall_rating || "—") + '/5 · ' +
@@ -2295,30 +2869,32 @@
             '<p class="list__meta">' + escapeHtml(f.comment || "No comment") + '</p></div>' +
             '<span class="text-tiny text-muted">' + escapeHtml(formatRelativeTime(f.created_at)) + '</span></div>';
         }).join("") + '</div>';
-      } catch (e) { renderError(list, e.message); }
+      } catch (err) { renderError(list, err.message); }
     }
   });
 
   Router.register("admin-reports", {
     title: "Reports",
-    subtitle: "Operational analytics.",
+    subtitle: "Operational analytics from real data.",
     render: async function (container) {
-      container.innerHTML = '<section class="card"><div class="card__header"><h3 class="card__title">Trips by status</h3></div>' +
+      container.innerHTML =
+        '<section class="card"><div class="card__header"><h3 class="card__title">Trips by status</h3></div>' +
         '<div class="card__body" id="trips-by-status"></div></section>';
+
       try {
         const { data: trips } = await supabase.from("trips").select("status");
         const counts = {};
         (trips || []).forEach(function (t) { counts[t.status] = (counts[t.status] || 0) + 1; });
         const el = document.getElementById("trips-by-status");
         if (!el) return;
-        if (!Object.keys(counts).length) {
+        if (Object.keys(counts).length === 0) {
           renderEmpty(el, { icon: "📈", title: "No data", message: "Analytics will appear once trips are recorded." });
         } else {
           el.innerHTML = '<div class="stat-grid">' + Object.keys(counts).map(function (k) {
             return statCard("📊", counts[k], humanizeStatus(k), "");
           }).join("") + '</div>';
         }
-      } catch (e) {}
+      } catch (err) { /* silent */ }
     }
   });
 
@@ -2327,45 +2903,53 @@
     subtitle: "Platform configuration.",
     render: async function (container) {
       container.innerHTML = '<section class="card"><div class="card__body">' +
-        '<p class="text-muted">Platform settings live in the <code>settings</code> table.</p>' +
-        '</div></section>';
+        '<p class="text-muted">Platform settings will be managed through the <code>settings</code> table. ' +
+        'This view is reserved for future configuration options.</p></div></section>';
     }
   });
 
+
   /* =======================================================================
-     18. GPS
+     22. GPS TRACKING
      ======================================================================= */
   function startGpsWatch(trip) {
     if (!navigator.geolocation) {
-      Toast.warning("GPS unavailable");
+      Toast.warning("GPS unavailable", "This device does not support geolocation.");
       return;
     }
     if (AppState.gpsWatchId !== null) return;
 
-    let last = 0;
+    let lastUpdate = 0;
+
     AppState.gpsWatchId = navigator.geolocation.watchPosition(
-      async function (pos) {
+      async function (position) {
         const now = Date.now();
-        if (now - last < TRANSITCARE_CONFIG.GPS_UPDATE_INTERVAL_MS) return;
-        last = now;
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const s = document.getElementById("gps-status");
-        const m = document.getElementById("gps-message");
-        if (s) { s.className = "badge badge--in_transit"; s.textContent = "Live"; }
-        if (m) m.textContent = "Lat " + lat.toFixed(5) + ", Lng " + lng.toFixed(5);
+        if (now - lastUpdate < TRANSITCARE_CONFIG.GPS_UPDATE_INTERVAL_MS) return;
+        lastUpdate = now;
+
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const gpsStatus = document.getElementById("gps-status");
+        const gpsMessage = document.getElementById("gps-message");
+
+        if (gpsStatus) { gpsStatus.className = "badge badge--in_transit"; gpsStatus.textContent = "Live"; }
+        if (gpsMessage) gpsMessage.textContent = "Lat " + lat.toFixed(5) + ", Lng " + lng.toFixed(5);
+
         try {
           await supabase.from("trip_locations").insert({
             trip_id: trip.id, latitude: lat, longitude: lng, recorded_at: nowIso()
           });
-        } catch (e) {}
+        } catch (err) { console.warn("[TransitCare] GPS insert failed:", err); }
       },
-      function (err) {
-        const s = document.getElementById("gps-status");
-        const m = document.getElementById("gps-message");
-        if (s) { s.className = "badge badge--rejected"; s.textContent = "Unavailable"; }
-        if (m) m.textContent = err.code === err.PERMISSION_DENIED ?
-          "GPS permission was denied." : "GPS signal may be unavailable.";
+      function (error) {
+        const gpsStatus = document.getElementById("gps-status");
+        const gpsMessage = document.getElementById("gps-message");
+        if (gpsStatus) { gpsStatus.className = "badge badge--rejected"; gpsStatus.textContent = "Unavailable"; }
+        if (gpsMessage) {
+          gpsMessage.textContent = error.code === error.PERMISSION_DENIED
+            ? "GPS permission was denied. Please enable location access."
+            : "GPS signal may be unavailable.";
+        }
       },
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
     );
@@ -2378,8 +2962,59 @@
     }
   }
 
+
   /* =======================================================================
-     19. NOTIFICATIONS
+     23–25. TICKETING / SEAT / WAITLIST
+     ======================================================================= */
+  async function runAutomaticSeatRelease() {
+    if (!supabase) return 0;
+    const cutoff = new Date(Date.now() - TRANSITCARE_CONFIG.BOARDING_WINDOW_MINUTES * 60000).toISOString();
+    const { data: stale } = await supabase.from("bookings")
+      .select("id, trip_id, seat_number, passenger_id")
+      .eq("status", "reserved").lt("created_at", cutoff);
+    if (!stale || stale.length === 0) return 0;
+
+    let released = 0;
+    for (const booking of stale) {
+      const { error } = await supabase.from("bookings").update({ status: "no_show" }).eq("id", booking.id);
+      if (!error) {
+        released++;
+        await Data.logAudit("seat_auto_released", "booking", booking.id, { seat: booking.seat_number });
+        await Notifications.create({
+          recipient_id: booking.passenger_id,
+          title: "Seat released",
+          message: "Seat " + booking.seat_number + " was released because you did not board in time.",
+          type: "seat_released",
+          related_entity: booking.id
+        });
+      }
+    }
+    return released;
+  }
+
+  const Waitlist = {
+    async join(tripId) {
+      if (!supabase || !AppState.authUser) return null;
+      const { data, error } = await supabase.from("waitlist").insert({
+        passenger_id: AppState.authUser.id,
+        trip_id: tripId,
+        status: "waiting"
+      }).select().single();
+      if (error) throw error;
+      return data;
+    },
+    async listForTrip(tripId) {
+      if (!supabase) return [];
+      const { data, error } = await supabase.from("waitlist").select("*")
+        .eq("trip_id", tripId).eq("status", "waiting").order("created_at", { ascending: true });
+      if (error) throw error;
+      return data || [];
+    }
+  };
+
+
+  /* =======================================================================
+     26. NOTIFICATIONS
      ======================================================================= */
   const Notifications = {
     async fetch() {
@@ -2392,9 +3027,9 @@
       return AppState.notifications;
     },
     async create(payload) {
-      if (!supabase) return;
+      if (!supabase) return null;
       try {
-        await supabase.from("notifications").insert({
+        const { error } = await supabase.from("notifications").insert({
           recipient_id: payload.recipient_id,
           title: payload.title,
           message: payload.message,
@@ -2402,54 +3037,168 @@
           related_entity: payload.related_entity || null,
           is_read: false
         });
-      } catch (e) {}
+        if (error) throw error;
+      } catch (err) { console.warn("[TransitCare] Notification insert failed:", err); }
     }
   };
 
-  async function refreshBadge() {
+  async function refreshNotificationBadge() {
     try {
-      const list = await Notifications.fetch();
-      const unread = list.filter(function (n) { return !n.is_read; }).length;
-      const b = document.getElementById("notification-badge");
-      if (b) {
-        b.textContent = unread;
-        b.classList.toggle("is-hidden", unread === 0);
+      const notifications = await Notifications.fetch();
+      const unread = notifications.filter(function (n) { return !n.is_read; }).length;
+      const badge = document.getElementById("notification-badge");
+      if (badge) {
+        badge.textContent = unread;
+        badge.classList.toggle("is-hidden", unread === 0);
       }
       renderNavigation();
-    } catch (e) {}
+    } catch (err) { /* silent */ }
   }
 
   function subscribeToNotifications() {
     if (!supabase || !AppState.authUser) return;
-    stopChannel("notifications");
+    stopRealtimeChannel("notifications");
+
     AppState.channels.notifications = supabase
-      .channel("notif-" + AppState.authUser.id)
+      .channel("notifications-" + AppState.authUser.id)
       .on("postgres_changes", {
         event: "INSERT", schema: "public",
         table: "notifications", filter: "recipient_id=eq." + AppState.authUser.id
-      }, function (p) {
-        if (!p.new) return;
-        AppState.notifications.unshift(p.new);
-        refreshBadge();
-        Toast.info(p.new.title || "New notification", p.new.message || "");
+      }, function (payload) {
+        const notification = payload.new;
+        if (!notification) return;
+        AppState.notifications.unshift(notification);
+        refreshNotificationBadge();
+        Toast.info(notification.title || "New notification", notification.message || "");
       })
       .subscribe();
   }
 
-  function stopChannel(name) {
-    const c = AppState.channels[name];
-    if (c && supabase) {
-      try { supabase.removeChannel(c); } catch (e) {}
+  function stopRealtimeChannel(name) {
+    const channel = AppState.channels[name];
+    if (channel && supabase) {
+      try { supabase.removeChannel(channel); } catch (err) { /* silent */ }
       AppState.channels[name] = null;
     }
   }
 
   function stopAllRealtime() {
-    Object.keys(AppState.channels).forEach(stopChannel);
+    Object.keys(AppState.channels).forEach(function (key) { stopRealtimeChannel(key); });
   }
 
+
   /* =======================================================================
-     20. UI HELPERS
+     27. FEEDBACK
+     ======================================================================= */
+  Router.register("feedback", {
+    title: "Leave feedback",
+    subtitle: "Help improve TransitCare.",
+    render: async function (container) {
+      try {
+        const { data: bookings } = await supabase.from("bookings")
+          .select("*, trips(*, routes(origin, destination))")
+          .eq("passenger_id", AppState.authUser.id).eq("status", "boarded")
+          .order("created_at", { ascending: false }).limit(1);
+
+        if (!bookings || bookings.length === 0) {
+          renderEmpty(container, { icon: "⭐", title: "No eligible trips", message: "You can leave feedback after completing a trip." });
+          return;
+        }
+
+        const booking = bookings[0];
+        const trip = booking.trips || {};
+        const route = trip.routes || {};
+
+        container.innerHTML =
+          '<section class="card"><div class="card__header"><h3 class="card__title">Rate your trip</h3></div>' +
+          '<div class="card__body"><p class="text-muted mb-4">' +
+            escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
+            '<form id="feedback-form">' +
+              '<div class="field"><label>Overall rating</label>' +
+                '<div class="rating-input">' +
+                  [5, 4, 3, 2, 1].map(function (n) {
+                    return '<input type="radio" name="rating" id="rating-' + n + '" value="' + n + '" />' +
+                      '<label for="rating-' + n + '" aria-label="' + n + ' stars">★</label>';
+                  }).join("") +
+                '</div></div>' +
+              '<div class="field"><label for="feedback-comment">Comments</label>' +
+                '<textarea id="feedback-comment" placeholder="Share your experience…"></textarea></div>' +
+              '<div class="form-actions"><button type="submit" class="button button--primary">Submit feedback</button></div>' +
+            '</form>' +
+          '</div></section>';
+
+        document.getElementById("feedback-form").addEventListener("submit", async function (event) {
+          event.preventDefault();
+          const ratingEl = document.querySelector('input[name="rating"]:checked');
+          if (!ratingEl) { Toast.warning("Please select a rating"); return; }
+          const rating = Number(ratingEl.value);
+          const comment = document.getElementById("feedback-comment").value.trim();
+
+          Loader.show("Submitting…");
+          try {
+            const { error } = await supabase.from("feedback").insert({
+              passenger_id: AppState.authUser.id,
+              trip_id: trip.id,
+              overall_rating: rating,
+              comment: comment || null
+            });
+            if (error) throw error;
+            Toast.success("Thank you for your feedback");
+            Router.go("home");
+          } catch (err) { Toast.error("Unable to submit feedback", err.message); }
+          finally { Loader.hide(); }
+        });
+      } catch (err) { renderError(container, err.message); }
+    }
+  });
+
+
+  /* =======================================================================
+     28. AUDIT LOGS
+     ======================================================================= */
+  Router.register("admin-audit", {
+    title: "Audit log",
+    subtitle: "Recent administrative activity.",
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body" id="audit-full-list"></div></div>';
+      const list = document.getElementById("audit-full-list");
+      renderLoading(list, "Loading audit log…");
+
+      try {
+        const { data, error } = await supabase.from("audit_logs").select("*")
+          .order("created_at", { ascending: false }).limit(200);
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "📝", title: "No audit entries", message: "Administrative actions will be logged here." });
+          return;
+        }
+        list.innerHTML = data.map(function (log) {
+          return '<div class="audit-entry">' +
+            '<span class="audit-entry__time">' + escapeHtml(formatDateTime(log.created_at)) + '</span>' +
+            '<span class="audit-entry__text">' + escapeHtml(log.action || "action") +
+              (log.entity_type ? ' · ' + escapeHtml(log.entity_type) : "") +
+              (log.entity_id ? ' (' + escapeHtml(String(log.entity_id).slice(0, 8)) + ')' : "") + '</span></div>';
+        }).join("");
+      } catch (err) { renderError(list, err.message); }
+    }
+  });
+
+
+  /* =======================================================================
+     29. ERROR HANDLING
+     ======================================================================= */
+  window.addEventListener("error", function (event) {
+    console.error("[TransitCare] Unhandled error:", event.error || event.message);
+  });
+
+  window.addEventListener("unhandledrejection", function (event) {
+    console.error("[TransitCare] Unhandled promise rejection:", event.reason);
+  });
+
+
+  /* =======================================================================
+     UI HELPERS
      ======================================================================= */
   function showAuthScreen() {
     document.getElementById("auth-screen").classList.remove("is-hidden");
@@ -2463,44 +3212,47 @@
   }
 
   function updateHeaderUser() {
-    const p = AppState.profile || {};
-    const name = p.full_name || "User";
+    const profile = AppState.profile || {};
+    const name = profile.full_name || "User";
     setText("header-user-name", name);
     setText("header-user-role", humanizeStatus(AppState.role || ""));
-    const a = document.getElementById("header-avatar");
-    if (a) a.textContent = getInitials(name);
+    const avatar = document.getElementById("header-avatar");
+    if (avatar) avatar.textContent = getInitials(name);
   }
 
   function openSidebar() {
     document.getElementById("app-shell").classList.add("sidebar-open");
-    const t = document.getElementById("sidebar-toggle");
-    if (t) t.setAttribute("aria-expanded", "true");
+    const toggle = document.getElementById("sidebar-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "true");
   }
 
   function closeSidebar() {
     document.getElementById("app-shell").classList.remove("sidebar-open");
-    const t = document.getElementById("sidebar-toggle");
-    if (t) t.setAttribute("aria-expanded", "false");
+    const toggle = document.getElementById("sidebar-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
   }
 
   function toggleSidebar() {
-    const s = document.getElementById("app-shell");
-    if (s.classList.contains("sidebar-open")) closeSidebar();
+    const shell = document.getElementById("app-shell");
+    if (shell.classList.contains("sidebar-open")) closeSidebar();
     else openSidebar();
   }
 
+
   /* =======================================================================
-     21. VERIFICATION NOTICE
+     VERIFICATION NOTICE HELPER
      ======================================================================= */
   function showVerificationNotice(email, role) {
     const message = document.getElementById("auth-message");
     if (!message) return;
-    const label = role === "driver" ? "Driver" : role === "operator" ? "Operator" : "Passenger";
+
+    const roleLabel = role === "driver" ? "Driver" : role === "operator" ? "Operator" : "Passenger";
+
     message.className = "alert alert--success";
     message.innerHTML =
       "<strong>Almost there — check your email.</strong>" +
       "<span>We sent a verification link to <code>" + escapeHtml(email) + "</code>. " +
-      "Click the link to activate your " + escapeHtml(label.toLowerCase()) + " account.</span>" +
+      "Click the link to activate your " + escapeHtml(roleLabel.toLowerCase()) + " account.</span>" +
       '<div class="mt-3" style="display:flex;gap:8px;flex-wrap:wrap;">' +
         '<button type="button" class="button button--ghost button--small" id="resend-verification">Resend verification email</button>' +
         '<button type="button" class="button button--ghost button--small" id="go-to-signin">Back to sign in</button>' +
@@ -2510,11 +3262,11 @@
     if (resend) {
       resend.addEventListener("click", async function () {
         resend.disabled = true;
-        resend.textContent = "Sending…";
+        resend.innerHTML = '<span class="button__spinner"></span> Sending…';
         try {
           await Auth.resendVerification(email);
-          Toast.success("Verification email resent");
-        } catch (e) { Toast.error("Unable", e.message); }
+          Toast.success("Verification email resent", "Check your inbox in a moment.");
+        } catch (err) { Toast.error("Unable to resend", err.message || "Please try again later."); }
         finally { resend.disabled = false; resend.textContent = "Resend verification email"; }
       });
     }
@@ -2522,16 +3274,18 @@
     const back = document.getElementById("go-to-signin");
     if (back) {
       back.addEventListener("click", function () {
-        const t = document.querySelector('[data-auth-mode="signin"]');
-        if (t) t.click();
+        const signinTab = document.querySelector('[data-auth-mode="signin"]');
+        if (signinTab) signinTab.click();
       });
     }
   }
 
+
   /* =======================================================================
-     22. FORM BINDINGS
+     FORM BINDINGS
      ======================================================================= */
   function bindAuthForms() {
+
     const signinForm = document.getElementById("signin-form");
     const signupForm = document.getElementById("signup-form");
     const forgotForm = document.getElementById("forgot-form");
@@ -2545,19 +3299,21 @@
         t.classList.remove("is-active");
         t.setAttribute("aria-selected", "false");
       });
+
       if (mode === "signin" && signinForm) {
         signinForm.classList.remove("is-hidden");
-        const t = document.getElementById("tab-signin");
-        if (t) t.classList.add("is-active");
+        const tab = document.getElementById("tab-signin");
+        if (tab) tab.classList.add("is-active");
       } else if (mode === "signup" && signupForm) {
         signupForm.classList.remove("is-hidden");
-        const t = document.getElementById("tab-signup");
-        if (t) t.classList.add("is-active");
+        const tab = document.getElementById("tab-signup");
+        if (tab) tab.classList.add("is-active");
       } else if (mode === "forgot" && forgotForm) {
         forgotForm.classList.remove("is-hidden");
       } else if (mode === "reset" && resetForm) {
         resetForm.classList.remove("is-hidden");
       }
+
       setFormMessage("auth-message", null, "");
     }
 
@@ -2571,73 +3327,85 @@
       btn.addEventListener("click", function () {
         const input = document.getElementById(btn.getAttribute("data-toggle-password"));
         if (!input) return;
-        const pw = input.type === "password";
-        input.type = pw ? "text" : "password";
-        btn.textContent = pw ? "Hide" : "Show";
+        const isPassword = input.type === "password";
+        input.type = isPassword ? "text" : "password";
+        btn.textContent = isPassword ? "Hide" : "Show";
+        btn.setAttribute("aria-label", isPassword ? "Hide password" : "Show password");
       });
     });
 
     bindPasswordMeter("signup-password", "password-meter-bar", "password-hint");
 
-    document.querySelectorAll('input[name="signup-role"]').forEach(function (r) {
-      r.addEventListener("change", function () {
-        const n = document.getElementById("driver-notice");
-        if (!n) return;
-        n.classList.toggle("is-hidden", r.value !== "driver" || !r.checked);
+    document.querySelectorAll('input[name="signup-role"]').forEach(function (radio) {
+      radio.addEventListener("change", function () {
+        const notice = document.getElementById("driver-notice");
+        if (!notice) return;
+        notice.classList.toggle("is-hidden", radio.value !== "driver" || !radio.checked);
       });
     });
 
+    /* ----- Sign in ----- */
     if (signinForm) {
-      signinForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
+      signinForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
         clearFormErrors(signinForm);
         setFormMessage("auth-message", null, "");
+
         const email = document.getElementById("signin-email").value.trim();
         const password = document.getElementById("signin-password").value;
-        let ok = true;
-        if (!Validators.email(email)) { setFieldError("signin-email", "Enter a valid email."); ok = false; }
-        if (!Validators.required(password)) { setFieldError("signin-password", "Enter your password."); ok = false; }
-        if (!ok) return;
 
-        const btn = document.getElementById("signin-submit");
-        btn.disabled = true;
-        btn.innerHTML = '<span class="button__spinner"></span> Signing in…';
+        let valid = true;
+        if (!Validators.email(email)) { setFieldError("signin-email", "Enter a valid email address."); valid = false; }
+        if (!Validators.required(password)) { setFieldError("signin-password", "Enter your password."); valid = false; }
+        if (!valid) return;
+
+        const submit = document.getElementById("signin-submit");
+        submit.disabled = true;
+        submit.innerHTML = '<span class="button__spinner"></span> Signing in…';
+
         try {
           await Auth.signIn(email, password);
         } catch (err) {
-          const msg = (err && err.message) || "";
-          if (/email not confirmed|not verified|confirm/i.test(msg)) {
-            const c = document.getElementById("auth-message");
-            c.className = "alert alert--warning";
-            c.innerHTML = "<strong>Email not yet verified.</strong>" +
-              "<span>Check your inbox for the verification link.</span>";
-            const rb = document.createElement("button");
-            rb.type = "button";
-            rb.className = "button button--ghost button--small mt-3";
-            rb.textContent = "Resend verification email";
-            rb.addEventListener("click", async function () {
-              rb.disabled = true;
-              rb.textContent = "Sending…";
-              try { await Auth.resendVerification(email); Toast.success("Resent"); }
-              catch (e2) { Toast.error("Unable", e2.message); }
-              finally { rb.disabled = false; rb.textContent = "Resend verification email"; }
+          const msg = (err && err.message) ? err.message : "";
+          if (/email not confirmed|email not verified|confirm/i.test(msg)) {
+            const container = document.getElementById("auth-message");
+            container.className = "alert alert--warning";
+            container.innerHTML =
+              "<strong>Your email is not yet verified.</strong>" +
+              "<span>Please check your inbox for the verification link we sent to <code>" +
+                escapeHtml(email) + "</code>.</span>";
+
+            const resendBtn = document.createElement("button");
+            resendBtn.type = "button";
+            resendBtn.className = "button button--ghost button--small mt-3";
+            resendBtn.textContent = "Resend verification email";
+            resendBtn.addEventListener("click", async function () {
+              resendBtn.disabled = true;
+              resendBtn.textContent = "Sending…";
+              try {
+                await Auth.resendVerification(email);
+                Toast.success("Verification email resent");
+              } catch (e2) { Toast.error("Unable to resend", e2.message); }
+              finally { resendBtn.disabled = false; resendBtn.textContent = "Resend verification email"; }
             });
-            c.appendChild(rb);
+            container.appendChild(resendBtn);
           } else {
             setFormMessage("auth-message", "danger", msg || "Unable to sign in.");
           }
         } finally {
-          btn.disabled = false;
-          btn.textContent = "Sign in";
+          submit.disabled = false;
+          submit.textContent = "Sign in";
         }
       });
     }
 
+    /* ----- Sign up ----- */
     if (signupForm) {
-      signupForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
+      signupForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
         clearFormErrors(signupForm);
         setFormMessage("auth-message", null, "");
+
         const fullName = document.getElementById("signup-fullname").value.trim();
         const email = document.getElementById("signup-email").value.trim();
         const phone = document.getElementById("signup-phone").value.trim();
@@ -2646,21 +3414,28 @@
         const terms = document.getElementById("signup-terms").checked;
         const role = document.querySelector('input[name="signup-role"]:checked').value;
 
-        let ok = true;
-        if (!Validators.required(fullName)) { setFieldError("signup-fullname", "Enter your full name."); ok = false; }
-        if (!Validators.email(email)) { setFieldError("signup-email", "Enter a valid email."); ok = false; }
-        if (phone && !Validators.phone(phone)) { setFieldError("signup-phone", "Enter a valid phone number."); ok = false; }
-        if (Validators.passwordStrength(password) < 3) { setFieldError("signup-password", "Password is too weak."); ok = false; }
-        if (password !== confirm) { setFieldError("signup-confirm", "Passwords do not match."); ok = false; }
-        if (!terms) { setFieldError("signup-terms", "Please accept the terms."); ok = false; }
-        if (!ok) return;
+        let valid = true;
+        if (!Validators.required(fullName)) { setFieldError("signup-fullname", "Enter your full name."); valid = false; }
+        if (!Validators.email(email)) { setFieldError("signup-email", "Enter a valid email address."); valid = false; }
+        if (phone && !Validators.phone(phone)) { setFieldError("signup-phone", "Enter a valid phone number."); valid = false; }
+        if (Validators.passwordStrength(password) < 3) {
+          setFieldError("signup-password", "Password is too weak. Use 8+ characters with letters and numbers.");
+          valid = false;
+        }
+        if (password !== confirm) { setFieldError("signup-confirm", "Passwords do not match."); valid = false; }
+        if (!terms) { setFieldError("signup-terms", "Please accept the terms to continue."); valid = false; }
+        if (!valid) return;
 
-        const btn = document.getElementById("signup-submit");
-        btn.disabled = true;
-        btn.innerHTML = '<span class="button__spinner"></span> Creating account…';
+        const submit = document.getElementById("signup-submit");
+        submit.disabled = true;
+        submit.innerHTML = '<span class="button__spinner"></span> Creating account…';
+
         try {
-          const result = await Auth.signUp({ fullName: fullName, email: email, phone: phone, password: password, role: role });
+          const result = await Auth.signUp({
+            fullName: fullName, email: email, phone: phone, password: password, role: role
+          });
           signupForm.reset();
+
           if (result.needsVerification) {
             showVerificationNotice(email, role);
           } else {
@@ -2669,76 +3444,93 @@
         } catch (err) {
           setFormMessage("auth-message", "danger", err.message || "Unable to create account.");
         } finally {
-          btn.disabled = false;
-          btn.textContent = "Create account";
+          submit.disabled = false;
+          submit.textContent = "Create account";
         }
       });
     }
 
+    /* ----- Forgot password ----- */
     const forgotButton = document.getElementById("forgot-password-button");
     if (forgotButton) forgotButton.addEventListener("click", function () { showAuthForm("forgot"); });
+
     const forgotBack = document.getElementById("forgot-back-button");
     if (forgotBack) forgotBack.addEventListener("click", function () { showAuthForm("signin"); });
 
     if (forgotForm) {
-      forgotForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
+      forgotForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
         clearFormErrors(forgotForm);
+        setFormMessage("auth-message", null, "");
+
         const email = document.getElementById("forgot-email").value.trim();
-        if (!Validators.email(email)) { setFieldError("forgot-email", "Enter a valid email."); return; }
-        const btn = document.getElementById("forgot-submit");
-        btn.disabled = true;
-        btn.innerHTML = '<span class="button__spinner"></span> Sending…';
+        if (!Validators.email(email)) { setFieldError("forgot-email", "Enter a valid email address."); return; }
+
+        const submit = document.getElementById("forgot-submit");
+        submit.disabled = true;
+        submit.innerHTML = '<span class="button__spinner"></span> Sending…';
+
         try {
           await Auth.sendPasswordReset(email);
           setFormMessage("auth-message", "success", "Reset link sent. Check your email.");
           forgotForm.reset();
         } catch (err) {
-          setFormMessage("auth-message", "danger", err.message || "Unable to send.");
+          setFormMessage("auth-message", "danger", err.message || "Unable to send reset link.");
         } finally {
-          btn.disabled = false;
-          btn.textContent = "Send reset link";
+          submit.disabled = false;
+          submit.textContent = "Send reset link";
         }
       });
     }
 
+    /* ----- Reset password ----- */
     if (resetForm) {
-      resetForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
+      resetForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
         clearFormErrors(resetForm);
+        setFormMessage("auth-message", null, "");
+
         const password = document.getElementById("reset-password").value;
         const confirm = document.getElementById("reset-confirm").value;
-        let ok = true;
-        if (Validators.passwordStrength(password) < 3) { setFieldError("reset-password", "Password too weak."); ok = false; }
-        if (password !== confirm) { setFieldError("reset-confirm", "Passwords do not match."); ok = false; }
-        if (!ok) return;
-        const btn = document.getElementById("reset-submit");
-        btn.disabled = true;
-        btn.innerHTML = '<span class="button__spinner"></span> Updating…';
+
+        let valid = true;
+        if (Validators.passwordStrength(password) < 3) { setFieldError("reset-password", "Password is too weak."); valid = false; }
+        if (password !== confirm) { setFieldError("reset-confirm", "Passwords do not match."); valid = false; }
+        if (!valid) return;
+
+        const submit = document.getElementById("reset-submit");
+        submit.disabled = true;
+        submit.innerHTML = '<span class="button__spinner"></span> Updating…';
+
         try {
           await Auth.updatePassword(password);
           setFormMessage("auth-message", "success", "Password updated. You can now sign in.");
           setTimeout(function () { showAuthForm("signin"); }, 1200);
         } catch (err) {
-          setFormMessage("auth-message", "danger", err.message || "Unable to update.");
+          setFormMessage("auth-message", "danger", err.message || "Unable to update password.");
         } finally {
-          btn.disabled = false;
-          btn.textContent = "Update password";
+          submit.disabled = false;
+          submit.textContent = "Update password";
         }
       });
     }
   }
 
+
   /* =======================================================================
-     23. BOOTSTRAP
+     30. BOOTSTRAP
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
-    if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) return;
+
+    if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
+      return;
+    }
 
     AppState.authUser = session.user;
 
     let profile = await Profile.fetch(session.user.id);
+
     if (!profile && session.user.user_metadata) {
       const meta = session.user.user_metadata;
       try {
@@ -2750,7 +3542,7 @@
           role: meta.role || "passenger",
           status: meta.role === "driver" ? "email_verified" : "active"
         });
-      } catch (e) {}
+      } catch (err) { console.warn("[TransitCare] Auto profile insert failed:", err); }
       profile = await Profile.fetch(session.user.id);
     }
 
@@ -2760,7 +3552,8 @@
     showAppShell();
     updateHeaderUser();
     renderNavigation();
-    await refreshBadge();
+
+    await refreshNotificationBadge();
     subscribeToNotifications();
 
     const defaultView =
@@ -2777,20 +3570,20 @@
 
     const shell = document.getElementById("app-shell");
     if (shell) {
-      shell.addEventListener("click", function (e) {
+      shell.addEventListener("click", function (event) {
         if (!shell.classList.contains("sidebar-open")) return;
-        if (e.target === shell) closeSidebar();
+        if (event.target === shell) closeSidebar();
       });
     }
 
     const trigger = document.getElementById("user-menu-trigger");
     const dropdown = document.getElementById("user-menu-dropdown");
     if (trigger && dropdown) {
-      trigger.addEventListener("click", function (e) {
-        e.stopPropagation();
-        const open = !dropdown.classList.contains("is-hidden");
-        dropdown.classList.toggle("is-hidden", open);
-        trigger.setAttribute("aria-expanded", String(!open));
+      trigger.addEventListener("click", function (event) {
+        event.stopPropagation();
+        const isOpen = !dropdown.classList.contains("is-hidden");
+        dropdown.classList.toggle("is-hidden", isOpen);
+        trigger.setAttribute("aria-expanded", String(!isOpen));
       });
       document.addEventListener("click", function () {
         dropdown.classList.add("is-hidden");
@@ -2798,22 +3591,17 @@
       });
     }
 
-    const signout = document.getElementById("signout-button");
-    if (signout) signout.addEventListener("click", function () { Auth.signOut(); });
+    const signoutButton = document.getElementById("signout-button");
+    if (signoutButton) signoutButton.addEventListener("click", function () { Auth.signOut(); });
 
-    const notif = document.getElementById("header-notifications-button");
-    if (notif) notif.addEventListener("click", function () { Router.go("notifications"); });
+    const notifButton = document.getElementById("header-notifications-button");
+    if (notifButton) notifButton.addEventListener("click", function () { Router.go("notifications"); });
 
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
   async function bootstrap() {
     initSupabase();
-
-    if (!IS_SUPABASE_CONFIGURED) {
-      const w = document.getElementById("config-warning");
-      if (w) w.classList.remove("is-hidden");
-    }
 
     bindAuthForms();
     wireGlobalUi();
@@ -2827,32 +3615,40 @@
     if (hash.includes("type=recovery")) {
       showAuthScreen();
       document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
-      const rf = document.getElementById("reset-form");
-      if (rf) rf.classList.remove("is-hidden");
+      const resetForm = document.getElementById("reset-form");
+      if (resetForm) resetForm.classList.remove("is-hidden");
       return;
     }
 
     let handled = false;
 
     supabase.auth.onAuthStateChange(async function (event, session) {
+      console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
+
       if (event === "PASSWORD_RECOVERY") {
         showAuthScreen();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
-        const rf = document.getElementById("reset-form");
-        if (rf) rf.classList.remove("is-hidden");
+        const resetForm = document.getElementById("reset-form");
+        if (resetForm) resetForm.classList.remove("is-hidden");
         handled = true;
         return;
       }
+
       if (event === "SIGNED_OUT" || !session) {
         resetState();
         showAuthScreen();
         handled = true;
         return;
       }
-      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
+
+      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" ||
+          event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
         try {
           await handleSignedIn(session);
-        } catch (e) { showAuthScreen(); }
+        } catch (err) {
+          console.warn("[TransitCare] handleSignedIn failed:", err);
+          showAuthScreen();
+        }
         handled = true;
       }
     });
@@ -2864,7 +3660,8 @@
       } else if (!handled) {
         showAuthScreen();
       }
-    } catch (e) {
+    } catch (err) {
+      console.warn("[TransitCare] Initial session check failed:", err);
       if (!handled) showAuthScreen();
     }
   }
