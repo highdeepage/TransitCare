@@ -4,18 +4,28 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="description" content="Eko TransitCare — Know Your Ride Before You Leave. Smart public/shared transportation coordination for Lagos." />
-<meta name="theme-color" content="#0B6E4F" />
+<meta name="theme-color" content="#0A0E1F" />
 <title>Eko TransitCare — Know Your Ride Before You Leave</title>
 
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>" />
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+
+<!-- =====================================================
+     DECORATIVE BACKGROUND ORBS (behind auth screen)
+     ===================================================== -->
+<div class="bg-orbs" aria-hidden="true">
+  <span class="bg-orbs__orb bg-orbs__orb--1"></span>
+  <span class="bg-orbs__orb bg-orbs__orb--2"></span>
+  <span class="bg-orbs__orb bg-orbs__orb--3"></span>
+</div>
+
 
 <!-- =====================================================
      TOAST NOTIFICATION CONTAINER
@@ -24,7 +34,7 @@
 
 
 <!-- =====================================================
-     MODAL LAYER (reused by every screen)
+     MODAL LAYER
      ===================================================== -->
 <div id="modal-backdrop" class="modal-backdrop is-hidden" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -48,43 +58,89 @@
 
 
 <!-- =====================================================
-     AUTHENTICATION SCREEN
+     AUTHENTICATION SCREEN — Modern Ride Interface
      ===================================================== -->
 <div id="auth-screen" class="auth-screen is-hidden">
 
-  <!-- Brand panel -->
-  <section class="auth-brand" aria-label="About Eko TransitCare">
-    <div class="auth-brand__inner">
-      <div class="brand-lockup">
-        <span class="brand-lockup__mark" aria-hidden="true">🚌</span>
-        <div>
-          <h1 class="brand-lockup__name">Eko TransitCare</h1>
-          <p class="brand-lockup__tagline">Know Your Ride Before You Leave.</p>
+  <!-- ================= LEFT: BRAND STAGE ================= -->
+  <section class="auth-hero" aria-label="About Eko TransitCare">
+
+    <div class="auth-hero__inner">
+
+      <!-- ---------- HEADER: brand separated from tagline ---------- -->
+      <header class="hero-header">
+
+        <div class="hero-header__brand">
+          <span class="hero-header__icon" aria-hidden="true">
+            <span class="hero-header__icon-glyph">🚌</span>
+            <span class="hero-header__icon-ring"></span>
+          </span>
+          <h1 class="hero-header__name">Eko TransitCare</h1>
         </div>
-      </div>
 
-      <p class="auth-brand__lede">
-        A smart companion for Lagos commuters. See the bus, the terminal, the route,
-        the departure time, the fare and the seats — <strong>before</strong> you leave home.
-      </p>
+        <!-- Animated separator -->
+        <div class="hero-header__divider" role="presentation">
+          <span class="hero-header__divider-line"></span>
+          <span class="hero-header__divider-dot"></span>
+          <span class="hero-header__divider-line"></span>
+        </div>
 
-      <ul class="auth-brand__points">
-        <li><span aria-hidden="true">📍</span> Terminals, routes &amp; stops from real operators</li>
-        <li><span aria-hidden="true">🕒</span> Live departure &amp; boarding status</li>
-        <li><span aria-hidden="true">💺</span> Seat availability before you arrive</li>
-        <li><span aria-hidden="true">🗺️</span> Track an active bus on the map</li>
+        <div class="hero-header__body">
+          <p class="hero-header__lede">
+            A smart companion for Lagos commuters. See the bus, the terminal, the route,
+            the departure time, the fare and the seats — before you leave home.
+          </p>
+          <p class="hero-header__tagline">Know Your Ride Before You Leave.</p>
+        </div>
+
+      </header>
+
+      <!-- ---------- Feature list ---------- -->
+      <ul class="hero-features">
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">📍</span>
+          <div>
+            <p class="hero-features__label">Real terminals &amp; routes</p>
+            <p class="hero-features__desc">Data from participating operators across Lagos</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">🕒</span>
+          <div>
+            <p class="hero-features__label">Live departure status</p>
+            <p class="hero-features__desc">Know if your bus is scheduled, boarding or departed</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">💺</span>
+          <div>
+            <p class="hero-features__label">Seats before you arrive</p>
+            <p class="hero-features__desc">Reserve, pay and receive a QR ticket instantly</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">🛰️</span>
+          <div>
+            <p class="hero-features__label">Track an active bus</p>
+            <p class="hero-features__desc">Live map, ETA, and next available trip</p>
+          </div>
+        </li>
       </ul>
 
-      <p class="auth-brand__credit">Powered by <strong>Ajigbeda Girls Digital Queens</strong></p>
+      <!-- ---------- Footer credit ---------- -->
+      <footer class="hero-footer">
+        <span class="hero-footer__label">Powered by</span>
+        <strong class="hero-footer__brand">Ajigbeda Girls Digital Queens</strong>
+      </footer>
+
     </div>
   </section>
 
-  <!-- Form panel -->
-  <section class="auth-panel" aria-label="Account access">
 
+  <!-- ================= RIGHT: AUTH CARD ================= -->
+  <section class="auth-panel" aria-label="Account access">
     <div class="auth-panel__inner">
 
-      <!-- Tabs -->
       <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
         <button type="button" class="auth-tab is-active" id="tab-signin" role="tab"
                 aria-selected="true" aria-controls="panel-signin" data-auth-mode="signin">
@@ -94,15 +150,14 @@
                 aria-selected="false" aria-controls="panel-signup" data-auth-mode="signup">
           Create account
         </button>
+        <span class="auth-tabs__indicator" aria-hidden="true"></span>
       </div>
 
-      <!-- Setup warning (shown if Supabase is not configured) -->
       <div id="config-warning" class="alert alert--warning is-hidden" role="alert">
         <strong>Setup required.</strong>
         <span>Add your Supabase URL and anon key at the top of <code>script.js</code>.</span>
       </div>
 
-      <!-- Generic auth message area -->
       <div id="auth-message" class="alert is-hidden" role="alert"></div>
 
       <!-- ---------------- SIGN IN ---------------- -->
@@ -138,7 +193,7 @@
           </button>
         </div>
 
-        <button type="submit" class="button button--primary button--block" id="signin-submit">
+        <button type="submit" class="button button--primary button--block button--glow" id="signin-submit">
           Sign in
         </button>
       </form>
@@ -180,10 +235,7 @@
 
         <div id="driver-notice" class="alert alert--info is-hidden">
           <strong>Driver accounts require approval.</strong>
-          <span>
-            After you verify your email, an administrator will review your account.
-            You cannot operate trips until you are approved.
-          </span>
+          <span>After verifying your email, an administrator will review your account.</span>
         </div>
 
         <div class="field">
@@ -240,7 +292,7 @@
         </label>
         <p class="field__error" data-error-for="signup-terms"></p>
 
-        <button type="submit" class="button button--primary button--block" id="signup-submit">
+        <button type="submit" class="button button--primary button--block button--glow" id="signup-submit">
           Create account
         </button>
       </form>
@@ -248,9 +300,7 @@
       <!-- ---------------- FORGOT PASSWORD ---------------- -->
       <form id="forgot-form" class="auth-form is-hidden" novalidate>
         <h2 class="auth-form__title">Reset your password</h2>
-        <p class="auth-form__subtitle">
-          Enter your email and we will send you a secure reset link.
-        </p>
+        <p class="auth-form__subtitle">Enter your email and we will send you a secure reset link.</p>
 
         <div class="field">
           <label for="forgot-email">Email address</label>
@@ -259,15 +309,15 @@
           <p class="field__error" data-error-for="forgot-email"></p>
         </div>
 
-        <button type="submit" class="button button--primary button--block" id="forgot-submit">
+        <button type="submit" class="button button--primary button--block button--glow" id="forgot-submit">
           Send reset link
         </button>
-        <button type="button" class="button button--ghost button--block" id="forgot-back-button">
+        <button type="button" class="button button--ghost button--block mt-3" id="forgot-back-button">
           Back to sign in
         </button>
       </form>
 
-      <!-- ---------------- RESET PASSWORD (arrived from email link) ---------------- -->
+      <!-- ---------------- RESET PASSWORD ---------------- -->
       <form id="reset-form" class="auth-form is-hidden" novalidate>
         <h2 class="auth-form__title">Choose a new password</h2>
         <p class="auth-form__subtitle">Your reset link was verified. Set a new password below.</p>
@@ -294,7 +344,7 @@
           <p class="field__error" data-error-for="reset-confirm"></p>
         </div>
 
-        <button type="submit" class="button button--primary button--block" id="reset-submit">
+        <button type="submit" class="button button--primary button--block button--glow" id="reset-submit">
           Update password
         </button>
       </form>
@@ -308,11 +358,11 @@
 
 
 <!-- =====================================================
-     APPLICATION SHELL (shown when signed in)
+     APPLICATION SHELL
      ===================================================== -->
 <div id="app-shell" class="app-shell is-hidden">
 
-  <!-- ---------- Header ---------- -->
+  <!-- ---------- App Header with animated brand separator ---------- -->
   <header class="app-header">
     <button type="button" class="app-header__menu" id="sidebar-toggle"
             aria-label="Toggle navigation" aria-expanded="false">
@@ -323,6 +373,7 @@
       <span class="app-header__brand-mark" aria-hidden="true">🚌</span>
       <span class="app-header__brand-text">
         <strong>Eko TransitCare</strong>
+        <span class="app-header__brand-divider" aria-hidden="true"></span>
         <small>Know Your Ride Before You Leave</small>
       </span>
     </a>
@@ -362,30 +413,23 @@
 
   <!-- ---------- Body ---------- -->
   <div class="app-body">
-
-    <!-- ---------- Sidebar navigation (rendered per role) ---------- -->
     <aside class="app-sidebar" id="app-sidebar" aria-label="Main navigation">
       <nav class="app-nav" id="app-nav"></nav>
-
       <div class="app-sidebar__footer">
         <p class="app-sidebar__credit">Powered by <strong>Ajigbeda Girls Digital Queens</strong></p>
         <p class="app-sidebar__version" id="app-version">v1.0 · Phase 2</p>
       </div>
     </aside>
 
-    <!-- ---------- Main view container ---------- -->
-    <main class="app-main" id="view-root" tabindex="-1">
-      <!-- Views are rendered here by script.js -->
-    </main>
+    <main class="app-main" id="view-root" tabindex="-1"></main>
   </div>
 
-  <!-- ---------- Mobile bottom navigation (rendered per role) ---------- -->
   <nav class="app-bottom-nav" id="app-bottom-nav" aria-label="Primary navigation"></nav>
 </div>
 
 
 <!-- =====================================================
-     SUPABASE CLIENT (public anon key only — never service role)
+     SUPABASE CLIENT
      ===================================================== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 
