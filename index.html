@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="description" content="Eko TransitCare — Know Your Ride Before You Leave. Smart public/shared transportation coordination for Lagos." />
-<meta name="theme-color" content="#0A0E1F" />
+<meta name="theme-color" content="#F0EBFF" />
 <title>Eko TransitCare — Know Your Ride Before You Leave</title>
 
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>" />
@@ -18,23 +18,24 @@
 <body>
 
 <!-- =====================================================
-     DECORATIVE BACKGROUND ORBS (behind auth screen)
+     DECORATIVE BACKGROUND (soft, light, behind everything)
      ===================================================== -->
-<div class="bg-orbs" aria-hidden="true">
-  <span class="bg-orbs__orb bg-orbs__orb--1"></span>
-  <span class="bg-orbs__orb bg-orbs__orb--2"></span>
-  <span class="bg-orbs__orb bg-orbs__orb--3"></span>
+<div class="bg-canvas" aria-hidden="true">
+  <span class="bg-canvas__blob bg-canvas__blob--1"></span>
+  <span class="bg-canvas__blob bg-canvas__blob--2"></span>
+  <span class="bg-canvas__blob bg-canvas__blob--3"></span>
+  <span class="bg-canvas__grid"></span>
 </div>
 
 
 <!-- =====================================================
-     TOAST NOTIFICATION CONTAINER
+     TOAST CONTAINER
      ===================================================== -->
 <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
 
 
 <!-- =====================================================
-     MODAL LAYER
+     MODAL
      ===================================================== -->
 <div id="modal-backdrop" class="modal-backdrop is-hidden" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -49,27 +50,24 @@
 
 
 <!-- =====================================================
-     GLOBAL LOADING OVERLAY
+     GLOBAL LOADER
      ===================================================== -->
 <div id="global-loader" class="global-loader is-hidden" aria-hidden="true">
   <div class="spinner" aria-hidden="true"></div>
-  <p class="global-loader__text" id="global-loader-text">Working…</p>
+  <p class="global-loader__text" id="global-loader-text">Loading…</p>
 </div>
 
 
 <!-- =====================================================
-     AUTHENTICATION SCREEN — Modern Ride Interface
+     AUTH SCREEN — visible by default (no is-hidden)
      ===================================================== -->
-<div id="auth-screen" class="auth-screen is-hidden">
+<div id="auth-screen" class="auth-screen">
 
-  <!-- ================= LEFT: BRAND STAGE ================= -->
+  <!-- ---------- LEFT: HERO ---------- -->
   <section class="auth-hero" aria-label="About Eko TransitCare">
-
     <div class="auth-hero__inner">
 
-      <!-- ---------- HEADER: brand separated from tagline ---------- -->
       <header class="hero-header">
-
         <div class="hero-header__brand">
           <span class="hero-header__icon" aria-hidden="true">
             <span class="hero-header__icon-glyph">🚌</span>
@@ -78,7 +76,6 @@
           <h1 class="hero-header__name">Eko TransitCare</h1>
         </div>
 
-        <!-- Animated separator -->
         <div class="hero-header__divider" role="presentation">
           <span class="hero-header__divider-line"></span>
           <span class="hero-header__divider-dot"></span>
@@ -92,10 +89,8 @@
           </p>
           <p class="hero-header__tagline">Know Your Ride Before You Leave.</p>
         </div>
-
       </header>
 
-      <!-- ---------- Feature list ---------- -->
       <ul class="hero-features">
         <li class="hero-features__item">
           <span class="hero-features__icon" aria-hidden="true">📍</span>
@@ -127,7 +122,6 @@
         </li>
       </ul>
 
-      <!-- ---------- Footer credit ---------- -->
       <footer class="hero-footer">
         <span class="hero-footer__label">Powered by</span>
         <strong class="hero-footer__brand">Ajigbeda Girls Digital Queens</strong>
@@ -137,232 +131,236 @@
   </section>
 
 
-  <!-- ================= RIGHT: AUTH CARD ================= -->
+  <!-- ---------- RIGHT: AUTH CARD (thick border) ---------- -->
   <section class="auth-panel" aria-label="Account access">
     <div class="auth-panel__inner">
 
-      <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
-        <button type="button" class="auth-tab is-active" id="tab-signin" role="tab"
-                aria-selected="true" aria-controls="panel-signin" data-auth-mode="signin">
-          Sign in
-        </button>
-        <button type="button" class="auth-tab" id="tab-signup" role="tab"
-                aria-selected="false" aria-controls="panel-signup" data-auth-mode="signup">
-          Create account
-        </button>
-        <span class="auth-tabs__indicator" aria-hidden="true"></span>
-      </div>
+      <div class="auth-card">
 
-      <div id="config-warning" class="alert alert--warning is-hidden" role="alert">
-        <strong>Setup required.</strong>
-        <span>Add your Supabase URL and anon key at the top of <code>script.js</code>.</span>
-      </div>
-
-      <div id="auth-message" class="alert is-hidden" role="alert"></div>
-
-      <!-- ---------------- SIGN IN ---------------- -->
-      <form id="signin-form" class="auth-form" novalidate>
-        <h2 class="auth-form__title">Welcome back</h2>
-        <p class="auth-form__subtitle">Sign in to see your trips, tickets and notifications.</p>
-
-        <div class="field">
-          <label for="signin-email">Email address</label>
-          <input type="email" id="signin-email" name="email" autocomplete="email"
-                 placeholder="you@example.com" required />
-          <p class="field__error" data-error-for="signin-email"></p>
-        </div>
-
-        <div class="field">
-          <label for="signin-password">Password</label>
-          <div class="field__password">
-            <input type="password" id="signin-password" name="password"
-                   autocomplete="current-password" placeholder="Your password" required />
-            <button type="button" class="field__toggle" data-toggle-password="signin-password"
-                    aria-label="Show password">Show</button>
-          </div>
-          <p class="field__error" data-error-for="signin-password"></p>
-        </div>
-
-        <div class="auth-form__row">
-          <label class="checkbox">
-            <input type="checkbox" id="signin-remember" checked />
-            <span>Keep me signed in</span>
-          </label>
-          <button type="button" class="link-button" id="forgot-password-button">
-            Forgot password?
+        <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+          <button type="button" class="auth-tab is-active" id="tab-signin" role="tab"
+                  aria-selected="true" aria-controls="panel-signin" data-auth-mode="signin">
+            Sign in
           </button>
+          <button type="button" class="auth-tab" id="tab-signup" role="tab"
+                  aria-selected="false" aria-controls="panel-signup" data-auth-mode="signup">
+            Create account
+          </button>
+          <span class="auth-tabs__indicator" aria-hidden="true"></span>
         </div>
 
-        <button type="submit" class="button button--primary button--block button--glow" id="signin-submit">
-          Sign in
-        </button>
-      </form>
-
-      <!-- ---------------- SIGN UP ---------------- -->
-      <form id="signup-form" class="auth-form is-hidden" novalidate>
-        <h2 class="auth-form__title">Create your account</h2>
-        <p class="auth-form__subtitle">Choose how you will use TransitCare.</p>
-
-        <fieldset class="role-picker">
-          <legend class="role-picker__legend">I am a…</legend>
-          <div class="role-picker__options">
-            <label class="role-option">
-              <input type="radio" name="signup-role" value="passenger" checked />
-              <span class="role-option__card">
-                <span class="role-option__icon" aria-hidden="true">👤</span>
-                <span class="role-option__label">Passenger</span>
-                <span class="role-option__hint">Find &amp; book buses</span>
-              </span>
-            </label>
-            <label class="role-option">
-              <input type="radio" name="signup-role" value="driver" />
-              <span class="role-option__card">
-                <span class="role-option__icon" aria-hidden="true">👨‍✈️</span>
-                <span class="role-option__label">Driver</span>
-                <span class="role-option__hint">Run scheduled trips</span>
-              </span>
-            </label>
-            <label class="role-option">
-              <input type="radio" name="signup-role" value="operator" />
-              <span class="role-option__card">
-                <span class="role-option__icon" aria-hidden="true">🏢</span>
-                <span class="role-option__label">Operator</span>
-                <span class="role-option__hint">Manage a fleet</span>
-              </span>
-            </label>
-          </div>
-        </fieldset>
-
-        <div id="driver-notice" class="alert alert--info is-hidden">
-          <strong>Driver accounts require approval.</strong>
-          <span>After verifying your email, an administrator will review your account.</span>
+        <div id="config-warning" class="alert alert--warning is-hidden" role="alert">
+          <strong>Setup required.</strong>
+          <span>Add your Supabase URL and anon key at the top of <code>script.js</code>.</span>
         </div>
 
-        <div class="field">
-          <label for="signup-fullname">Full name</label>
-          <input type="text" id="signup-fullname" name="full_name" autocomplete="name"
-                 placeholder="e.g. Amina Bello" required />
-          <p class="field__error" data-error-for="signup-fullname"></p>
-        </div>
+        <div id="auth-message" class="alert is-hidden" role="alert"></div>
 
-        <div class="field-row">
+        <!-- ---------------- SIGN IN ---------------- -->
+        <form id="signin-form" class="auth-form" novalidate>
+          <h2 class="auth-form__title">Welcome back</h2>
+          <p class="auth-form__subtitle">Sign in to see your trips, tickets and notifications.</p>
+
           <div class="field">
-            <label for="signup-email">Email address</label>
-            <input type="email" id="signup-email" name="email" autocomplete="email"
+            <label for="signin-email">Email address</label>
+            <input type="email" id="signin-email" name="email" autocomplete="email"
                    placeholder="you@example.com" required />
-            <p class="field__error" data-error-for="signup-email"></p>
+            <p class="field__error" data-error-for="signin-email"></p>
           </div>
+
           <div class="field">
-            <label for="signup-phone">Phone number</label>
-            <input type="tel" id="signup-phone" name="phone" autocomplete="tel"
-                   placeholder="0803 000 0000" />
-            <p class="field__error" data-error-for="signup-phone"></p>
+            <label for="signin-password">Password</label>
+            <div class="field__password">
+              <input type="password" id="signin-password" name="password"
+                     autocomplete="current-password" placeholder="Your password" required />
+              <button type="button" class="field__toggle" data-toggle-password="signin-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="signin-password"></p>
           </div>
-        </div>
 
-        <div class="field">
-          <label for="signup-password">Password</label>
-          <div class="field__password">
-            <input type="password" id="signup-password" name="password"
-                   autocomplete="new-password" placeholder="At least 8 characters" required />
-            <button type="button" class="field__toggle" data-toggle-password="signup-password"
-                    aria-label="Show password">Show</button>
+          <div class="auth-form__row">
+            <label class="checkbox">
+              <input type="checkbox" id="signin-remember" checked />
+              <span>Keep me signed in</span>
+            </label>
+            <button type="button" class="link-button" id="forgot-password-button">
+              Forgot password?
+            </button>
           </div>
-          <div class="password-meter" aria-hidden="true">
-            <span class="password-meter__bar" id="password-meter-bar"></span>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="signin-submit">
+            Sign in
+          </button>
+        </form>
+
+        <!-- ---------------- SIGN UP ---------------- -->
+        <form id="signup-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Create your account</h2>
+          <p class="auth-form__subtitle">Choose how you will use TransitCare.</p>
+
+          <fieldset class="role-picker">
+            <legend class="role-picker__legend">I am a…</legend>
+            <div class="role-picker__options">
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="passenger" checked />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">👤</span>
+                  <span class="role-option__label">Passenger</span>
+                  <span class="role-option__hint">Find &amp; book buses</span>
+                </span>
+              </label>
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="driver" />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">👨‍✈️</span>
+                  <span class="role-option__label">Driver</span>
+                  <span class="role-option__hint">Run scheduled trips</span>
+                </span>
+              </label>
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="operator" />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">🏢</span>
+                  <span class="role-option__label">Operator</span>
+                  <span class="role-option__hint">Manage a fleet</span>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div id="driver-notice" class="alert alert--info is-hidden">
+            <strong>Driver accounts require approval.</strong>
+            <span>After verifying your email, an administrator will review your account.</span>
           </div>
-          <p class="field__hint" id="password-hint">Use 8+ characters with letters and numbers.</p>
-          <p class="field__error" data-error-for="signup-password"></p>
-        </div>
 
-        <div class="field">
-          <label for="signup-confirm">Confirm password</label>
-          <div class="field__password">
-            <input type="password" id="signup-confirm" name="confirm_password"
-                   autocomplete="new-password" placeholder="Repeat your password" required />
-            <button type="button" class="field__toggle" data-toggle-password="signup-confirm"
-                    aria-label="Show password">Show</button>
+          <div class="field">
+            <label for="signup-fullname">Full name</label>
+            <input type="text" id="signup-fullname" name="full_name" autocomplete="name"
+                   placeholder="e.g. Amina Bello" required />
+            <p class="field__error" data-error-for="signup-fullname"></p>
           </div>
-          <p class="field__error" data-error-for="signup-confirm"></p>
-        </div>
 
-        <label class="checkbox checkbox--terms">
-          <input type="checkbox" id="signup-terms" required />
-          <span>I agree to the TransitCare terms of use and privacy policy.</span>
-        </label>
-        <p class="field__error" data-error-for="signup-terms"></p>
-
-        <button type="submit" class="button button--primary button--block button--glow" id="signup-submit">
-          Create account
-        </button>
-      </form>
-
-      <!-- ---------------- FORGOT PASSWORD ---------------- -->
-      <form id="forgot-form" class="auth-form is-hidden" novalidate>
-        <h2 class="auth-form__title">Reset your password</h2>
-        <p class="auth-form__subtitle">Enter your email and we will send you a secure reset link.</p>
-
-        <div class="field">
-          <label for="forgot-email">Email address</label>
-          <input type="email" id="forgot-email" name="email" autocomplete="email"
-                 placeholder="you@example.com" required />
-          <p class="field__error" data-error-for="forgot-email"></p>
-        </div>
-
-        <button type="submit" class="button button--primary button--block button--glow" id="forgot-submit">
-          Send reset link
-        </button>
-        <button type="button" class="button button--ghost button--block mt-3" id="forgot-back-button">
-          Back to sign in
-        </button>
-      </form>
-
-      <!-- ---------------- RESET PASSWORD ---------------- -->
-      <form id="reset-form" class="auth-form is-hidden" novalidate>
-        <h2 class="auth-form__title">Choose a new password</h2>
-        <p class="auth-form__subtitle">Your reset link was verified. Set a new password below.</p>
-
-        <div class="field">
-          <label for="reset-password">New password</label>
-          <div class="field__password">
-            <input type="password" id="reset-password" autocomplete="new-password"
-                   placeholder="At least 8 characters" required />
-            <button type="button" class="field__toggle" data-toggle-password="reset-password"
-                    aria-label="Show password">Show</button>
+          <div class="field-row">
+            <div class="field">
+              <label for="signup-email">Email address</label>
+              <input type="email" id="signup-email" name="email" autocomplete="email"
+                     placeholder="you@example.com" required />
+              <p class="field__error" data-error-for="signup-email"></p>
+            </div>
+            <div class="field">
+              <label for="signup-phone">Phone number</label>
+              <input type="tel" id="signup-phone" name="phone" autocomplete="tel"
+                     placeholder="0803 000 0000" />
+              <p class="field__error" data-error-for="signup-phone"></p>
+            </div>
           </div>
-          <p class="field__error" data-error-for="reset-password"></p>
-        </div>
 
-        <div class="field">
-          <label for="reset-confirm">Confirm new password</label>
-          <div class="field__password">
-            <input type="password" id="reset-confirm" autocomplete="new-password"
-                   placeholder="Repeat your new password" required />
-            <button type="button" class="field__toggle" data-toggle-password="reset-confirm"
-                    aria-label="Show password">Show</button>
+          <div class="field">
+            <label for="signup-password">Password</label>
+            <div class="field__password">
+              <input type="password" id="signup-password" name="password"
+                     autocomplete="new-password" placeholder="At least 8 characters" required />
+              <button type="button" class="field__toggle" data-toggle-password="signup-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <div class="password-meter" aria-hidden="true">
+              <span class="password-meter__bar" id="password-meter-bar"></span>
+            </div>
+            <p class="field__hint" id="password-hint">Use 8+ characters with letters and numbers.</p>
+            <p class="field__error" data-error-for="signup-password"></p>
           </div>
-          <p class="field__error" data-error-for="reset-confirm"></p>
-        </div>
 
-        <button type="submit" class="button button--primary button--block button--glow" id="reset-submit">
-          Update password
-        </button>
-      </form>
+          <div class="field">
+            <label for="signup-confirm">Confirm password</label>
+            <div class="field__password">
+              <input type="password" id="signup-confirm" name="confirm_password"
+                     autocomplete="new-password" placeholder="Repeat your password" required />
+              <button type="button" class="field__toggle" data-toggle-password="signup-confirm"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="signup-confirm"></p>
+          </div>
 
-      <p class="auth-panel__footer">
-        Powered by <strong>Ajigbeda Girls Digital Queens</strong>
-      </p>
+          <label class="checkbox checkbox--terms">
+            <input type="checkbox" id="signup-terms" required />
+            <span>I agree to the TransitCare terms of use and privacy policy.</span>
+          </label>
+          <p class="field__error" data-error-for="signup-terms"></p>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="signup-submit">
+            Create account
+          </button>
+        </form>
+
+        <!-- ---------------- FORGOT PASSWORD ---------------- -->
+        <form id="forgot-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Reset your password</h2>
+          <p class="auth-form__subtitle">Enter your email and we will send you a secure reset link.</p>
+
+          <div class="field">
+            <label for="forgot-email">Email address</label>
+            <input type="email" id="forgot-email" name="email" autocomplete="email"
+                   placeholder="you@example.com" required />
+            <p class="field__error" data-error-for="forgot-email"></p>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="forgot-submit">
+            Send reset link
+          </button>
+          <button type="button" class="button button--ghost button--block mt-3" id="forgot-back-button">
+            Back to sign in
+          </button>
+        </form>
+
+        <!-- ---------------- RESET PASSWORD ---------------- -->
+        <form id="reset-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Choose a new password</h2>
+          <p class="auth-form__subtitle">Your reset link was verified. Set a new password below.</p>
+
+          <div class="field">
+            <label for="reset-password">New password</label>
+            <div class="field__password">
+              <input type="password" id="reset-password" autocomplete="new-password"
+                     placeholder="At least 8 characters" required />
+              <button type="button" class="field__toggle" data-toggle-password="reset-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="reset-password"></p>
+          </div>
+
+          <div class="field">
+            <label for="reset-confirm">Confirm new password</label>
+            <div class="field__password">
+              <input type="password" id="reset-confirm" autocomplete="new-password"
+                     placeholder="Repeat your new password" required />
+              <button type="button" class="field__toggle" data-toggle-password="reset-confirm"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="reset-confirm"></p>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="reset-submit">
+            Update password
+          </button>
+        </form>
+
+        <p class="auth-card__footer">
+          Powered by <strong>Ajigbeda Girls Digital Queens</strong>
+        </p>
+
+      </div>
+
     </div>
   </section>
 </div>
 
 
 <!-- =====================================================
-     APPLICATION SHELL
+     APP SHELL
      ===================================================== -->
 <div id="app-shell" class="app-shell is-hidden">
 
-  <!-- ---------- App Header with animated brand separator ---------- -->
   <header class="app-header">
     <button type="button" class="app-header__menu" id="sidebar-toggle"
             aria-label="Toggle navigation" aria-expanded="false">
@@ -411,7 +409,6 @@
     </div>
   </header>
 
-  <!-- ---------- Body ---------- -->
   <div class="app-body">
     <aside class="app-sidebar" id="app-sidebar" aria-label="Main navigation">
       <nav class="app-nav" id="app-nav"></nav>
@@ -428,14 +425,7 @@
 </div>
 
 
-<!-- =====================================================
-     SUPABASE CLIENT
-     ===================================================== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-
-<!-- =====================================================
-     APPLICATION LOGIC
-     ===================================================== -->
 <script src="script.js"></script>
 
 </body>
