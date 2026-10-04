@@ -2444,124 +2444,194 @@
     }
   });
 
-  Router.register("admin-drivers", {
+    Router.register("admin-drivers", {
     title: "Driver approval",
-    subtitle: "Review and approve driver accounts.",
+    subtitle: "Approve drivers and assign vehicles.",
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="drivers-list"></div></div>';
       const list = document.getElementById("drivers-list");
       renderLoading(list, "Loading drivers…");
 
       try {
-        const { data, error } = await supabase.from("profiles").select("*")
-          .eq("role", "driver").order("created_at", { ascending: false });
-        if (error) throw error;
+        /* Fetch drivers AND vehicles in one shot so we can show assignments
+           next to each driver. */
+        const [driversRes, vehiclesRes] = await Promise.all([
+          supabase.from("profiles").select("*").eq("role", "driver").order("created_at", { ascending: false }),
+          supabase.from("vehicles").select("*").order("registration_number", { ascending: true })
+        ]);
+        if (driversRes.error) throw driversRes.error;
+        if (vehiclesRes.error) throw vehiclesRes.error;
 
-        if (!data || data.length === 0) {
+        const drivers = driversRes.data || [];
+        const vehicles = vehiclesRes.data || [];
+
+        if (!drivers.length) {
           renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "No driver accounts have been registered." });
           return;
         }
 
-        list.innerHTML = '<div class="list">' + data.map(function (d) {
-          const actions = '<div class="list__actions">' +
-            (d.status !== "approved" ? '<button type="button" class="button button--small button--success" data-approve="' + escapeHtml(d.id) + '">Approve</button>' : "") +
-            (d.status !== "rejected" ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>' : "") +
-            '</div>';
-          return '<div class="list__item"><div class="list__main">' +
-            '<p class="list__title">' + escapeHtml(d.full_name || "—") + '</p>' +
-            '<p class="list__meta">' + escapeHtml(d.email || "") + ' · ' + escapeHtml(humanizeStatus(d.status || "pending")) + '</p></div>' +
-            actions + '</div>';
+        // Build a lookup: driver.id -> vehicle object
+        const vehicleByDriver = {};
+        vehicles.forEach(function (v) {
+          if (v.assigned_driver_id) {
+            vehicleByDriver[v.assigned_driver_id] = v;
+          }
+        });
+
+        list.innerHTML = '<div class="list">' + drivers.map(function (d) {
+          const vehicle = vehicleByDriver[d.id];
+          const vehicleLine = vehicle
+            ? '<span class="badge badge--in_transit" style="margin-left:6px;">🚌 ' +
+                escapeHtml(vehicle.registration_number) + '</span>'
+            : '<span class="badge badge--pending" style="margin-left:6px;">No vehicle</span>';
+
+          return '<div class="list__item">' +
+            '<div class="list__main">' +
+              '<p class="list__title">' + escapeHtml(d.full_name || "—") + ' ' + vehicleLine + '</p>' +
+              '<p class="list__meta">' + escapeHtml(d.email || "") + ' · ' +
+                escapeHtml(humanizeStatus(d.status || "pending")) +
+                (vehicle ? ' · ' + escapeHtml(vehicle.capacity) + ' seats' : "") + '</p>' +
+            '</div>' +
+            '<div class="list__actions">' +
+              '<button type="button" class="button button--small button--secondary" data-assign="' + escapeHtml(d.id) + '">' +
+                (vehicle ? 'Change vehicle' : 'Assign vehicle') +
+              '</button>' +
+              (d.status !== "approved"
+                ? '<button type="button" class="button button--small button--success" data-approve="' + escapeHtml(d.id) + '">Approve</button>'
+                : "") +
+              (d.status !== "rejected"
+                ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>'
+                : "") +
+            '</div>' +
+          '</div>';
         }).join("") + '</div>';
 
+        /* Wire up Approve */
         list.querySelectorAll("[data-approve]").forEach(function (btn) {
-          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-approve"), "approved"); });
+          btn.addEventListener("click", function () {
+            updateDriverStatus(btn.getAttribute("data-approve"), "approved");
+          });
         });
+
+        /* Wire up Reject */
         list.querySelectorAll("[data-reject]").forEach(function (btn) {
-          btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-reject"), "rejected"); });
+          btn.addEventListener("click", function () {
+            updateDriverStatus(btn.getAttribute("data-reject"), "rejected");
+          });
         });
-      } catch (err) { renderError(list, err.message); }
+
+        /* Wire up Assign vehicle */
+        list.querySelectorAll("[data-assign]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const driverId = btn.getAttribute("data-assign");
+            const driver = drivers.find(function (x) { return x.id === driverId; });
+            if (driver) openAssignVehicleModal(driver, vehicles, vehicleByDriver);
+          });
+        });
+
+      } catch (err) {
+        renderError(list, err.message);
+      }
     }
   });
 
-  async function updateDriverStatus(driverId, status) {
-    Loader.show("Updating…");
-    try {
-      const { error } = await supabase.from("profiles").update({ status: status }).eq("id", driverId);
-      if (error) throw error;
 
-      await Data.logAudit("driver_" + status, "profile", driverId, null);
+  /* -----------------------------------------------------------------------
+     Vehicle assignment modal
+     Shows every vehicle. Vehicles already assigned to another driver are
+     marked "currently assigned to another driver" and disabled.
+     Saving updates the vehicles table — no SQL required.
+     ----------------------------------------------------------------------- */
+  function openAssignVehicleModal(driver, vehicles, vehicleByDriver) {
+    const currentVehicle = vehicleByDriver[driver.id];
 
-      await Notifications.create({
-        recipient_id: driverId,
-        title: "Account " + status,
-        message: "Your driver account has been " + status + ".",
-        type: "driver_status",
-        related_entity: driverId
-      });
+    /* Build <option> list. */
+    const options = vehicles.map(function (v) {
+      const ownerId = v.assigned_driver_id;
+      const isMine = ownerId === driver.id;
+      const isSomeoneElses = ownerId && ownerId !== driver.id;
 
-      Toast.success("Driver " + status);
-      Router.go("admin-drivers");
-    } catch (err) { Toast.error("Unable to update driver", err.message); }
-    finally { Loader.hide(); }
-  }
+      let label = v.registration_number +
+        " · " + v.capacity + " seats" +
+        (v.vehicle_type ? " · " + v.vehicle_type : "");
 
-  Router.register("admin-operators", {
-    title: "Operators",
-    subtitle: "Transport companies on the platform.",
-    headerActions: '<button type="button" class="button button--primary button--small" id="add-operator">+ Add operator</button>',
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="operators-list"></div></div>';
-      const list = document.getElementById("operators-list");
-      renderLoading(list, "Loading operators…");
+      if (isMine) {
+        label += " — currently assigned to this driver";
+      } else if (isSomeoneElses) {
+        label += " — already assigned to another driver";
+      } else {
+        label += " — available";
+      }
 
-      const addBtn = document.getElementById("add-operator");
-      if (addBtn) addBtn.addEventListener("click", openAddOperatorModal);
+      return '<option value="' + escapeHtml(v.id) + '"' +
+        (isMine ? ' selected' : '') +
+        (isSomeoneElses ? ' disabled' : '') +
+      '>' + escapeHtml(label) + '</option>';
+    }).join("");
 
-      try {
-        const data = await Data.getOperators();
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "🏢", title: "No operators", message: "Add your first transport operator." });
-          return;
-        }
-        list.innerHTML = '<div class="list">' + data.map(function (o) {
-          return '<div class="list__item"><div class="list__main">' +
-            '<p class="list__title">' + escapeHtml(o.name) + '</p>' +
-            '<p class="list__meta">' + escapeHtml(o.contact_name || "") + ' · ' + escapeHtml(o.phone || "") + '</p></div>' +
-            '<span class="badge badge--' + escapeHtml(o.status || "active") + '">' +
-              escapeHtml(humanizeStatus(o.status || "active")) + '</span></div>';
-        }).join("") + '</div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
-  function openAddOperatorModal() {
     Modal.open({
-      title: "Add operator",
-      body: '<div class="field"><label for="op-name">Operator name</label><input type="text" id="op-name" /></div>' +
-        '<div class="field"><label for="op-contact">Contact name</label><input type="text" id="op-contact" /></div>' +
-        '<div class="field"><label for="op-phone">Phone</label><input type="tel" id="op-phone" /></div>' +
-        '<div class="field"><label for="op-email">Email</label><input type="email" id="op-email" /></div>',
-      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
-        '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
+      title: "Assign vehicle to " + (driver.full_name || "driver"),
+      body:
+        '<p class="text-muted mb-4">Choose the vehicle this driver will operate. ' +
+        'A driver can only have one vehicle at a time.</p>' +
+        '<div class="field">' +
+          '<label for="assign-vehicle-select">Vehicle</label>' +
+          '<select id="assign-vehicle-select">' +
+            '<option value="">— No vehicle —</option>' +
+            options +
+          '</select>' +
+        '</div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Save assignment</button>',
       onAction: async function (action) {
         if (action === "cancel") { Modal.close(); return; }
-        const name = document.getElementById("op-name").value.trim();
-        if (!name) { Toast.warning("Name required"); return; }
-        Loader.show("Saving…");
+
+        const select = document.getElementById("assign-vehicle-select");
+        const newVehicleId = select.value;
+
+        Loader.show("Saving assignment…");
         try {
-          const { error } = await supabase.from("operators").insert({
-            name: name,
-            contact_name: document.getElementById("op-contact").value.trim() || null,
-            phone: document.getElementById("op-phone").value.trim() || null,
-            email: document.getElementById("op-email").value.trim() || null,
-            status: "active"
-          });
-          if (error) throw error;
+          /* 1. Clear any current assignment for this driver. */
+          if (currentVehicle && currentVehicle.id !== newVehicleId) {
+            await supabase
+              .from("vehicles")
+              .update({ assigned_driver_id: null })
+              .eq("id", currentVehicle.id);
+          }
+
+          /* 2. Assign the new vehicle if one was chosen. */
+          if (newVehicleId) {
+            const { error } = await supabase
+              .from("vehicles")
+              .update({ assigned_driver_id: driver.id })
+              .eq("id", newVehicleId);
+            if (error) throw error;
+          }
+
+          await Data.logAudit(
+            "vehicle_assigned",
+            "vehicle",
+            newVehicleId || null,
+            { driver_id: driver.id, driver_name: driver.full_name }
+          );
+
           Modal.close();
-          Toast.success("Operator added");
-          Router.go("admin-operators");
-        } catch (err) { Toast.error("Unable to save", err.message); }
-        finally { Loader.hide(); }
+          Toast.success(
+            "Vehicle assignment saved",
+            newVehicleId
+              ? "The driver can now publish trips using this vehicle."
+              : "The driver no longer has a vehicle assigned."
+          );
+
+          /* Refresh the driver list so the badge updates immediately. */
+          Router.go("admin-drivers");
+
+        } catch (err) {
+          Toast.error("Unable to assign vehicle", err.message);
+        } finally {
+          Loader.hide();
+        }
       }
     });
   }
@@ -2705,7 +2775,7 @@
   /* =======================================================================
      20. VEHICLE MANAGEMENT
      ======================================================================= */
-  Router.register("admin-vehicles", {
+    Router.register("admin-vehicles", {
     title: "Vehicles",
     subtitle: "All registered vehicles.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-vehicle">+ Add vehicle</button>',
@@ -2718,17 +2788,33 @@
       if (addBtn) addBtn.addEventListener("click", openAddVehicleModal);
 
       try {
-        const data = await Data.getVehicles();
-        if (!data || data.length === 0) {
+        /* Fetch vehicles + all driver profiles so we can show names. */
+        const [vehiclesRes, driversRes] = await Promise.all([
+          supabase.from("vehicles").select("*").order("registration_number", { ascending: true }),
+          supabase.from("profiles").select("id, full_name").eq("role", "driver")
+        ]);
+        if (vehiclesRes.error) throw vehiclesRes.error;
+        if (driversRes.error) throw driversRes.error;
+
+        const data = vehiclesRes.data || [];
+        const driversById = {};
+        (driversRes.data || []).forEach(function (d) { driversById[d.id] = d.full_name; });
+
+        if (!data.length) {
           renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "Add your first vehicle." });
           return;
         }
+
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-          '<thead><tr><th>Registration</th><th>Type</th><th>Capacity</th><th>Status</th></tr></thead><tbody>' +
+          '<thead><tr><th>Registration</th><th>Type</th><th>Capacity</th><th>Assigned to</th><th>Status</th></tr></thead><tbody>' +
           data.map(function (v) {
+            const driverName = v.assigned_driver_id
+              ? (driversById[v.assigned_driver_id] || "Unknown driver")
+              : '<span class="text-muted">Unassigned</span>';
             return '<tr><td>' + escapeHtml(v.registration_number) + '</td>' +
               '<td>' + escapeHtml(v.vehicle_type || "—") + '</td>' +
               '<td>' + escapeHtml(v.capacity || "—") + '</td>' +
+              '<td>' + driverName + '</td>' +
               '<td><span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
                 escapeHtml(humanizeStatus(v.status || "active")) + '</span></td></tr>';
           }).join("") + '</tbody></table></div>';
