@@ -1,5 +1,3 @@
-
-
 /* =========================================================================
    EKO TRANSITCARE — APPLICATION LOGIC
    "Know Your Ride Before You Leave."
@@ -47,37 +45,25 @@
   const TRANSITCARE_CONFIG = {
     /* ---------------------------------------------------------------------
        SUPABASE CREDENTIALS
-       Replace these two values with the ones from your Supabase project:
-       Supabase Dashboard → Project Settings → API
-       IMPORTANT: Use the "anon public" key only.
-       NEVER place the "service_role" key in frontend code.
+       Replace these two values with the ones from your Supabase project.
+       Use the **anon public** key only.
        --------------------------------------------------------------------- */
     SUPABASE_URL: "https://wjxldmgnglrrthzkzots.supabase.co",
     SUPABASE_ANON_KEY: "sb_publishable_Z4EiH6YUo-ThIDN-mKQYOg_u-JjPbD3",
 
-    /* Application behaviour */
     APP_NAME: "Eko TransitCare",
     APP_VERSION: "1.0.0 · Phase 2",
 
-    /* GPS */
-    GPS_UPDATE_INTERVAL_MS: 12000,   // minimum gap between location writes
-    GPS_STALE_THRESHOLD_MS: 60000,   // older than this = "signal may be unavailable"
+    GPS_UPDATE_INTERVAL_MS: 12000,
+    GPS_STALE_THRESHOLD_MS: 60000,
+    BOARDING_WINDOW_MINUTES: 10,
+    WAITLIST_OFFER_MINUTES: 5,
+    RESCHEDULE_CUTOFF_MINUTES: 15,
 
-    /* Boarding */
-    BOARDING_WINDOW_MINUTES: 10,     // seats auto-release this many mins after departure
-
-    /* Waitlist */
-    WAITLIST_OFFER_MINUTES: 5,       // passenger must accept within this window
-
-    /* Rescheduling */
-    RESCHEDULE_CUTOFF_MINUTES: 15,   // no reschedules inside this window before departure
-
-    /* Map */
-    DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 }, // Lagos
+    DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
 
-  /** Quick sanity check so we can warn the developer instead of failing silently. */
   const IS_SUPABASE_CONFIGURED =
     !TRANSITCARE_CONFIG.SUPABASE_URL.includes("YOUR-PROJECT-REF") &&
     !TRANSITCARE_CONFIG.SUPABASE_ANON_KEY.includes("YOUR-PUBLIC-ANON-KEY");
@@ -85,13 +71,11 @@
 
   /* =======================================================================
      02. EXTERNAL LIBRARY LOADER
-     Lazily inject third-party scripts (Leaflet, QRCode) only when needed.
      ======================================================================= */
   const libraryCache = {};
 
   function loadExternalScript(url) {
     if (libraryCache[url]) return libraryCache[url];
-
     libraryCache[url] = new Promise(function (resolve, reject) {
       const existing = document.querySelector('script[src="' + url + '"]');
       if (existing) {
@@ -106,7 +90,6 @@
       script.onerror = function () { reject(new Error("Failed to load " + url)); };
       document.head.appendChild(script);
     });
-
     return libraryCache[url];
   }
 
@@ -117,7 +100,7 @@
       link.rel = "stylesheet";
       link.href = url;
       link.onload = function () { resolve(); };
-      link.onerror = function () { resolve(); }; // non-fatal
+      link.onerror = function () { resolve(); };
       document.head.appendChild(link);
     });
   }
@@ -171,35 +154,24 @@
      04. APPLICATION STATE
      ======================================================================= */
   const AppState = {
-    /** Supabase auth user object */
     authUser: null,
-    /** Row from public.profiles */
     profile: null,
-    /** Derived role: passenger | driver | operator | admin */
     role: null,
-    /** Currently-rendered view key */
     currentView: "home",
-    /** Latest notifications for the badge */
     notifications: [],
-    /** Realtime channel handles */
     channels: {
       notifications: null,
       tripLocations: null,
       trips: null
     },
-    /** Live GPS watch id */
     gpsWatchId: null,
-    /** Current active trip (driver) */
     activeTrip: null,
-    /** Cached lookups to avoid repeat fetches within a session */
     cache: {
       terminals: null,
       operators: null,
       routes: null
     },
-    /** Search results for passenger search view */
     searchResults: null,
-    /** Currently selected booking draft */
     bookingDraft: null
   };
 
@@ -221,8 +193,6 @@
   /* =======================================================================
      05. UTILITIES
      ======================================================================= */
-
-  /** Escape a value for safe insertion into HTML. */
   function escapeHtml(value) {
     if (value === null || value === undefined) return "";
     return String(value)
@@ -233,7 +203,6 @@
       .replace(/'/g, "&#39;");
   }
 
-  /** Format an ISO date/time for display. */
   function formatDateTime(iso, options) {
     if (!iso) return "—";
     const date = new Date(iso);
@@ -266,7 +235,6 @@
     return "₦" + numeric.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   }
 
-  /** "just now", "3 minutes ago", "2 hours ago" */
   function formatRelativeTime(iso) {
     if (!iso) return "—";
     const then = new Date(iso).getTime();
@@ -284,20 +252,17 @@
     return formatDate(iso);
   }
 
-  /** Initials from a full name. */
   function getInitials(name) {
     if (!name) return "–";
     const parts = String(name).trim().split(/\s+/).slice(0, 2);
     return parts.map(function (p) { return p.charAt(0).toUpperCase(); }).join("") || "–";
   }
 
-  /** Safe text setter for an element by id. */
   function setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
   }
 
-  /** Debounce helper. */
   function debounce(fn, wait) {
     let timer = null;
     return function () {
@@ -308,7 +273,6 @@
     };
   }
 
-  /** Human-friendly label from a snake_case status. */
   function humanizeStatus(status) {
     if (!status) return "—";
     return String(status)
@@ -316,51 +280,41 @@
       .replace(/\b\w/g, function (c) { return c.toUpperCase(); });
   }
 
-  /** Build a DOM element from an HTML string. */
   function htmlToElement(html) {
     const template = document.createElement("template");
     template.innerHTML = html.trim();
     return template.content.firstElementChild;
   }
 
-  /** Generate a reasonably unique trip code. */
   function generateTripCode() {
     const random = Math.floor(100 + Math.random() * 900);
     return "TC-" + random;
   }
 
-  /** Generate a ticket code. */
   function generateTicketCode() {
     const stamp = Date.now().toString(36).toUpperCase();
     const random = Math.random().toString(36).slice(2, 6).toUpperCase();
     return "TKT-" + stamp + "-" + random;
   }
 
-  /** Get the value of a query string parameter. */
   function getQueryParam(name) {
     return new URLSearchParams(window.location.search).get(name);
   }
 
-  /** Current ISO timestamp. */
-  function nowIso() {
-    return new Date().toISOString();
-  }
+  function nowIso() { return new Date().toISOString(); }
 
-  /** Add minutes to a date/ISO and return ISO. */
   function addMinutes(iso, minutes) {
     const date = iso ? new Date(iso) : new Date();
     date.setMinutes(date.getMinutes() + minutes);
     return date.toISOString();
   }
 
-  /** Whether a trip has departed. */
   function hasTripDeparted(trip) {
     if (!trip) return false;
     if (trip.actual_departure) return true;
     return trip.status === "in_transit" || trip.status === "completed";
   }
 
-  /** Haversine distance in km between two coordinates. */
   function haversineKm(lat1, lng1, lat2, lng2) {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -372,9 +326,8 @@
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  /** Rough ETA string based on straight-line distance at an assumed speed. */
   function estimateEta(distanceKm, assumedKmh) {
-    const speed = assumedKmh || 22; // Lagos traffic average
+    const speed = assumedKmh || 22;
     const hours = distanceKm / speed;
     const minutes = Math.max(1, Math.round(hours * 60));
     if (minutes < 60) return minutes + " min";
@@ -468,7 +421,6 @@
       backdrop.setAttribute("aria-hidden", "false");
       document.body.style.overflow = "hidden";
 
-      // Bind footer buttons declared with data-modal-action
       footerEl.querySelectorAll("[data-modal-action]").forEach(function (button) {
         button.addEventListener("click", function () {
           if (typeof options.onAction === "function") {
@@ -477,7 +429,6 @@
         });
       });
 
-      // Focus the first interactive element for accessibility
       const focusTarget = bodyEl.querySelector(
         "input, select, textarea, button, [href], [tabindex]:not([tabindex='-1'])"
       );
@@ -499,7 +450,6 @@
       if (lastFocused && lastFocused.focus) lastFocused.focus();
     }
 
-    /** Convenience: confirmation dialog returning a Promise<boolean>. */
     function confirm(options) {
       return new Promise(function (resolve) {
         open({
@@ -567,7 +517,6 @@
     return { show: show, hide: hide };
   })();
 
-  /** Render an inline loading block into a container. */
   function renderLoading(container, message) {
     if (!container) return;
     container.innerHTML =
@@ -577,7 +526,6 @@
       '</div>';
   }
 
-  /** Render a useful empty state. */
   function renderEmpty(container, options) {
     if (!container) return;
     container.innerHTML =
@@ -591,7 +539,6 @@
       '</div>';
   }
 
-  /** Render an error state. */
   function renderError(container, message, retryFn) {
     if (!container) return;
     container.innerHTML =
@@ -619,7 +566,6 @@
       return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value).trim());
     },
     phone: function (value) {
-      // Nigerian-friendly: digits, spaces, +, -, parentheses; 7–15 digits
       const digits = String(value).replace(/[^\d]/g, "");
       return digits.length >= 7 && digits.length <= 15;
     },
@@ -634,7 +580,7 @@
       if (/[A-Z]/.test(v)) score++;
       if (/\d/.test(v)) score++;
       if (/[^A-Za-z0-9]/.test(v)) score++;
-      return score; // 0–5
+      return score;
     }
   };
 
@@ -668,7 +614,6 @@
     });
   }
 
-  /** Show a general message inside a form. */
   function setFormMessage(elementId, type, message) {
     const el = document.getElementById(elementId);
     if (!el) return;
@@ -681,7 +626,6 @@
     el.innerHTML = escapeHtml(message);
   }
 
-  /** Wire a password strength meter to an input. */
   function bindPasswordMeter(inputId, barId, hintId) {
     const input = document.getElementById(inputId);
     const bar = document.getElementById(barId);
@@ -720,7 +664,11 @@
      ======================================================================= */
   const Auth = {
 
-    /** Register a new account and create the matching profile row. */
+    /**
+     * Register a new account.
+     * Supabase sends the verification email.
+     * Returns { needsVerification, user, session }.
+     */
     async signUp(payload) {
       if (!supabase) throw new Error("Supabase is not configured.");
 
@@ -739,21 +687,27 @@
 
       if (error) throw error;
 
-      // If email confirmation is disabled, a session is returned immediately.
-      // Otherwise, we insert the profile using the auth user id.
-      const user = data.user;
-      if (user && user.id) {
-        await this.createProfileRow(user.id, payload);
+      const needsVerification = data.session === null;
+
+      // If Supabase already created a session (email confirmation disabled),
+      // ensure the profile row exists. Otherwise the handle_new_user trigger
+      // has already created it.
+      if (!needsVerification && data.user && data.user.id) {
+        try {
+          await this.createProfileRow(data.user.id, payload);
+        } catch (err) {
+          console.warn("[TransitCare] Profile insert skipped:", err && err.message);
+        }
       }
 
-      return data;
+      return {
+        needsVerification: needsVerification,
+        user: data.user,
+        session: data.session
+      };
     },
 
-    /**
-     * Insert the profile row. If RLS blocks this before email confirmation,
-     * the trigger created in the SQL setup will handle it instead — so we
-     * swallow duplicates but surface genuine errors.
-     */
+    /** Idempotent profile-row insert used only in dev mode. */
     async createProfileRow(userId, payload) {
       if (!supabase) return;
       const row = {
@@ -767,7 +721,6 @@
       try {
         const { error } = await supabase.from("profiles").insert(row);
         if (error && error.code !== "23505") {
-          // 23505 = unique violation (already exists) — fine.
           console.warn("[TransitCare] Profile insert warning:", error.message);
         }
       } catch (err) {
@@ -783,6 +736,19 @@
       return data;
     },
 
+    /** Send a fresh verification email. */
+    async resendVerification(email) {
+      if (!supabase) throw new Error("Supabase is not configured.");
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email: email,
+        options: {
+          emailRedirectTo: window.location.origin + window.location.pathname
+        }
+      });
+      if (error) throw error;
+    },
+
     /** Send a password reset email. */
     async sendPasswordReset(email) {
       if (!supabase) throw new Error("Supabase is not configured.");
@@ -792,7 +758,7 @@
       if (error) throw error;
     },
 
-    /** Update the password (used after arriving from a reset link). */
+    /** Update the password (after arriving from a reset link). */
     async updatePassword(newPassword) {
       if (!supabase) throw new Error("Supabase is not configured.");
       const { error } = await supabase.auth.updateUser({ password: newPassword });
@@ -829,7 +795,6 @@
      ======================================================================= */
   const Profile = {
 
-    /** Fetch the profile row for a given auth user id. */
     async fetch(userId) {
       if (!supabase || !userId) return null;
       const { data, error } = await supabase
@@ -844,7 +809,6 @@
       return data;
     },
 
-    /** Update the profile row. */
     async update(userId, patch) {
       if (!supabase || !userId) return null;
       const { data, error } = await supabase
@@ -857,7 +821,6 @@
       return data;
     },
 
-    /** Resolve the effective role for the signed-in user. */
     resolveRole(profile, authUser) {
       if (profile && profile.role) return profile.role;
       if (authUser && authUser.user_metadata && authUser.user_metadata.role) {
@@ -884,48 +847,47 @@
     ],
     driver: [
       { group: "Operations" },
-      { key: "driver-dashboard", label: "Dashboard",        icon: "📊" },
-      { key: "make-bus-available", label: "Make bus available", icon: "🚌" },
-      { key: "active-trip",      label: "Active trip",      icon: "📍" },
-      { key: "driver-trips",     label: "My trips",         icon: "🧭" },
-      { key: "scan-ticket",      label: "Scan ticket",      icon: "📷" },
+      { key: "driver-dashboard",   label: "Dashboard",           icon: "📊" },
+      { key: "make-bus-available", label: "Make bus available",  icon: "🚌" },
+      { key: "active-trip",        label: "Active trip",         icon: "📍" },
+      { key: "driver-trips",       label: "My trips",            icon: "🧭" },
+      { key: "scan-ticket",        label: "Scan ticket",         icon: "📷" },
       { group: "Account" },
-      { key: "notifications",    label: "Notifications",    icon: "🔔", badgeKey: "unreadNotifications" },
-      { key: "profile",          label: "Profile",          icon: "👤" }
+      { key: "notifications",      label: "Notifications",       icon: "🔔", badgeKey: "unreadNotifications" },
+      { key: "profile",            label: "Profile",             icon: "👤" }
     ],
     operator: [
       { group: "Fleet" },
-      { key: "operator-dashboard", label: "Dashboard",  icon: "📊" },
-      { key: "operator-fleet",     label: "Vehicles",   icon: "🚌" },
-      { key: "operator-drivers",   label: "Drivers",    icon: "👨‍✈️" },
-      { key: "operator-trips",     label: "Trips",      icon: "🧭" },
+      { key: "operator-dashboard", label: "Dashboard",    icon: "📊" },
+      { key: "operator-fleet",     label: "Vehicles",     icon: "🚌" },
+      { key: "operator-drivers",   label: "Drivers",      icon: "👨‍✈️" },
+      { key: "operator-trips",     label: "Trips",        icon: "🧭" },
       { group: "Account" },
       { key: "notifications",      label: "Notifications", icon: "🔔", badgeKey: "unreadNotifications" },
       { key: "profile",            label: "Profile",       icon: "👤" }
     ],
     admin: [
       { group: "Overview" },
-      { key: "admin-dashboard", label: "Dashboard",   icon: "📊" },
-      { key: "admin-users",     label: "Users",       icon: "👥" },
+      { key: "admin-dashboard", label: "Dashboard",       icon: "📊" },
+      { key: "admin-users",     label: "Users",           icon: "👥" },
       { key: "admin-drivers",   label: "Driver approval", icon: "✅" },
-      { key: "admin-operators", label: "Operators",   icon: "🏢" },
+      { key: "admin-operators", label: "Operators",       icon: "🏢" },
       { group: "Transport" },
-      { key: "admin-terminals", label: "Terminals",   icon: "📍" },
-      { key: "admin-routes",    label: "Routes",      icon: "🗺️" },
-      { key: "admin-vehicles",  label: "Vehicles",    icon: "🚌" },
-      { key: "admin-trips",     label: "Trips",       icon: "🧭" },
+      { key: "admin-terminals", label: "Terminals",       icon: "📍" },
+      { key: "admin-routes",    label: "Routes",          icon: "🗺️" },
+      { key: "admin-vehicles",  label: "Vehicles",        icon: "🚌" },
+      { key: "admin-trips",     label: "Trips",           icon: "🧭" },
       { group: "Operations" },
-      { key: "admin-tickets",   label: "Tickets",     icon: "🎫" },
-      { key: "admin-feedback",  label: "Feedback",    icon: "⭐" },
-      { key: "admin-reports",   label: "Reports",     icon: "📈" },
+      { key: "admin-tickets",   label: "Tickets",         icon: "🎫" },
+      { key: "admin-feedback",  label: "Feedback",        icon: "⭐" },
+      { key: "admin-reports",   label: "Reports",         icon: "📈" },
       { group: "Platform" },
-      { key: "admin-settings",  label: "Settings",    icon: "⚙️" },
-      { key: "notifications",   label: "Notifications", icon: "🔔", badgeKey: "unreadNotifications" },
-      { key: "profile",         label: "Profile",     icon: "👤" }
+      { key: "admin-settings",  label: "Settings",        icon: "⚙️" },
+      { key: "notifications",   label: "Notifications",   icon: "🔔", badgeKey: "unreadNotifications" },
+      { key: "profile",         label: "Profile",         icon: "👤" }
     ]
   };
 
-  /** Bottom-nav items: a short subset per role. */
   const BOTTOM_NAV = {
     passenger: ["home", "search", "my-trips", "tickets", "notifications"],
     driver: ["driver-dashboard", "make-bus-available", "active-trip", "scan-ticket", "profile"],
@@ -980,7 +942,6 @@
       }).join("");
     }
 
-    // Re-bind navigation events
     document.querySelectorAll("[data-nav-link]").forEach(function (el) {
       el.addEventListener("click", function (event) {
         event.preventDefault();
@@ -1004,15 +965,12 @@
      ======================================================================= */
   const Router = {
 
-    /** Registry of view definitions: { title, subtitle, render, onMount }. */
     registry: {},
 
-    /** Register a view. */
     register(key, definition) {
       this.registry[key] = definition;
     },
 
-    /** Render a view by key. */
     async go(key, params) {
       const definition = this.registry[key];
       const root = document.getElementById("view-root");
@@ -1061,7 +1019,6 @@
   /* =======================================================================
      SHARED DATA ACCESS HELPERS
      ======================================================================= */
-
   const Data = {
 
     async getTerminals(activeOnly) {
@@ -1111,7 +1068,6 @@
       return data || [];
     },
 
-    /** Count available seats for a trip. */
     async getSeatStats(tripId, capacity) {
       if (!supabase || !tripId) return { capacity: capacity || 0, reserved: 0, boarded: 0, available: capacity || 0 };
       const { data, error } = await supabase
@@ -1132,7 +1088,6 @@
       };
     },
 
-    /** Fetch trips matching a route (or origin/destination) and date. */
     async searchTrips(filters) {
       if (!supabase) return [];
       let query = supabase
@@ -1155,7 +1110,6 @@
       return data || [];
     },
 
-    /** Insert an audit-log entry. */
     async logAudit(action, entityType, entityId, details) {
       if (!supabase || !AppState.authUser) return;
       try {
@@ -1223,7 +1177,6 @@
         });
       });
 
-      // Load upcoming bookings
       const upcoming = document.getElementById("home-upcoming");
       try {
         renderLoading(upcoming, "Loading your trips…");
@@ -1248,7 +1201,6 @@
         renderError(upcoming, err.message);
       }
 
-      // Load notifications preview
       const notif = document.getElementById("home-notifications");
       try {
         renderLoading(notif, "Loading notifications…");
@@ -1274,7 +1226,6 @@
     }
   });
 
-  /** Render a booking row for lists. */
   function renderBookingRow(booking) {
     const trip = booking.trips || {};
     const route = trip.routes || {};
@@ -1300,7 +1251,6 @@
     );
   }
 
-  /** Render a notification row. */
   function renderNotificationRow(notification) {
     return (
       '<div class="notification-item' + (notification.is_read ? "" : " notification-item--unread") + '">' +
@@ -1315,7 +1265,6 @@
     );
   }
 
-  /* ---- Passenger search ---- */
   Router.register("search", {
     title: "Find a bus",
     subtitle: "Select your origin and destination to see available buses.",
@@ -1350,7 +1299,6 @@
           '<div class="card__body" id="search-results"></div>' +
         '</section>';
 
-      // Populate origin/destination selects from routes
       const originSelect = document.getElementById("search-origin");
       const destSelect = document.getElementById("search-destination");
       try {
@@ -1367,7 +1315,6 @@
         destSelect.innerHTML = '<option value="">Unable to load routes</option>';
       }
 
-      // Default date = today
       const dateInput = document.getElementById("search-date");
       if (dateInput) {
         const today = new Date();
@@ -1389,14 +1336,12 @@
         const dateValue = dateInput.value;
 
         try {
-          // Build a date window
           let dateFrom = null, dateTo = null;
           if (dateValue) {
             dateFrom = new Date(dateValue + "T00:00:00").toISOString();
             dateTo = new Date(dateValue + "T23:59:59").toISOString();
           }
 
-          // Fetch all trips in the window, then filter by route origin/dest.
           const trips = await Data.searchTrips({
             dateFrom: dateFrom,
             dateTo: dateTo
@@ -1410,7 +1355,6 @@
             filtered = filtered.filter(function (t) { return t.routes && t.routes.destination === destination; });
           }
 
-          // Enrich each trip with seat stats
           const enriched = await Promise.all(filtered.map(async function (trip) {
             const stats = await Data.getSeatStats(trip.id, trip.vehicles ? trip.vehicles.capacity : 0);
             return Object.assign({}, trip, { seatStats: stats });
@@ -1429,7 +1373,6 @@
             enriched.map(renderTripCard).join("") +
             '</div>';
 
-          // Bind booking buttons
           resultsEl.querySelectorAll("[data-book-trip]").forEach(function (btn) {
             btn.addEventListener("click", function () {
               const tripId = btn.getAttribute("data-book-trip");
@@ -1450,12 +1393,10 @@
         }
       }
 
-      // Initial search on load
       performSearch();
     }
   });
 
-  /** Render a trip card for search results. */
   function renderTripCard(trip) {
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
@@ -1464,9 +1405,7 @@
     const status = trip.status || "scheduled";
     const seatsLow = stats.available <= 3;
 
-    const departureDisplay = departure
-      ? formatTime(departure)
-      : "—";
+    const departureDisplay = departure ? formatTime(departure) : "—";
     const dateDisplay = departure ? formatDate(departure) : "—";
 
     const isTrackable = status === "in_transit" || status === "boarding";
@@ -1506,7 +1445,7 @@
           (isTrackable
             ? '<button type="button" class="button button--small button--ghost" data-track-trip="' + escapeHtml(trip.id) + '">Track</button>'
             : "") +
-          (stats.available > 0 && status === "scheduled" || status === "boarding"
+          (stats.available > 0 && (status === "scheduled" || status === "boarding")
             ? '<button type="button" class="button button--small button--primary" data-book-trip="' + escapeHtml(trip.id) + '">Book</button>'
             : '<span class="badge badge--cancelled">Full</span>') +
         '</div>' +
@@ -1514,7 +1453,6 @@
     );
   }
 
-  /** Open the seat selection + booking modal. */
   async function openBookingModal(trip) {
     Modal.open({
       title: "Select your seat",
@@ -1530,7 +1468,6 @@
       }
     });
 
-    // Load seat grid
     const body = document.getElementById("modal-body");
     try {
       const stats = await Data.getSeatStats(trip.id, trip.vehicles ? trip.vehicles.capacity : 0);
@@ -1541,7 +1478,6 @@
         return;
       }
 
-      // Fetch existing bookings for this trip
       const { data: existing } = await supabase
         .from("bookings")
         .select("seat_number, status")
@@ -1598,7 +1534,6 @@
         });
       });
 
-      // Store selected seat on the modal scope
       Modal._selectedSeat = null;
       const originalConfirm = document.getElementById("modal-confirm-booking");
       if (originalConfirm) {
@@ -1612,7 +1547,6 @@
     }
   }
 
-  /** Complete a booking: insert booking + ticket + notification + audit log. */
   async function completeBooking(trip) {
     const seat = trip._selectedSeat;
     if (!seat) {
@@ -1622,7 +1556,6 @@
 
     Loader.show("Processing booking…");
     try {
-      // Check the seat is still free (race-condition guard)
       const { data: conflict } = await supabase
         .from("bookings")
         .select("id")
@@ -1653,7 +1586,6 @@
 
       if (bookingError) throw bookingError;
 
-      // Create the ticket
       const ticketPayload = {
         booking_id: booking.id,
         ticket_code: generateTicketCode(),
@@ -1663,7 +1595,6 @@
       const { error: ticketError } = await supabase.from("tickets").insert(ticketPayload);
       if (ticketError) throw ticketError;
 
-      // Create a notification for the passenger
       await Notifications.create({
         recipient_id: AppState.authUser.id,
         title: "Ticket confirmed",
@@ -1686,7 +1617,6 @@
     }
   }
 
-  /* ---- Passenger: my trips ---- */
   Router.register("my-trips", {
     title: "My trips",
     subtitle: "Your recent and upcoming journeys.",
@@ -1722,7 +1652,6 @@
     }
   });
 
-  /* ---- Passenger: tickets ---- */
   Router.register("tickets", {
     title: "My tickets",
     subtitle: "Show these at boarding. Each ticket can only be used once.",
@@ -1750,7 +1679,6 @@
 
         list.innerHTML = '<div class="card-grid">' + data.map(renderTicketCard).join("") + '</div>';
 
-        // Render QR codes after the DOM is ready
         data.forEach(function (booking) {
           const ticket = booking.tickets && booking.tickets[0];
           if (ticket) renderQrForTicket(ticket.ticket_code, "qr-" + ticket.id);
@@ -1767,8 +1695,6 @@
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
     const ticket = booking.tickets && booking.tickets[0];
-    const statusClass = booking.status === "boarded" ? "completed"
-      : booking.status === "cancelled" ? "cancelled" : "scheduled";
 
     return (
       '<article class="ticket-card">' +
@@ -1803,7 +1729,6 @@
     );
   }
 
-  /** Render a QR code into a container using the qrcode.js library. */
   async function renderQrForTicket(text, containerId) {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -1825,7 +1750,6 @@
     }
   }
 
-  /* ---- Passenger: track trip ---- */
   Router.register("track-trip", {
     title: "Track your bus",
     subtitle: "Live location updates from the driver's device.",
@@ -1877,10 +1801,7 @@
             '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
           '</dl>';
 
-        // Set up the map
         await initTrackingMap(trip);
-
-        // Subscribe to location updates
         subscribeToTripLocations(trip.id);
 
       } catch (err) {
@@ -1915,7 +1836,6 @@
         maxZoom: 19
       }).addTo(trackMapInstance);
 
-      // Fetch the latest location
       const { data: locations } = await supabase
         .from("trip_locations")
         .select("*")
@@ -1949,7 +1869,6 @@
     }
     trackMapInstance.setView([lat, lng], trackMapInstance.getZoom() || 14);
 
-    // Update the overlay
     const mapEl = document.getElementById("track-map");
     if (mapEl) {
       let overlay = mapEl.querySelector(".map-overlay");
@@ -1986,7 +1905,6 @@
       .subscribe();
   }
 
-  /* ---- Passenger: notifications ---- */
   Router.register("notifications", {
     title: "Notifications",
     subtitle: "Trip reminders, ticket updates and seat releases.",
@@ -2026,7 +1944,6 @@
         }
         list.innerHTML = notifications.map(renderNotificationRow).join("");
 
-        // Mark as read when clicked
         list.querySelectorAll(".notification-item--unread").forEach(function (item) {
           item.addEventListener("click", async function () {
             const id = item.getAttribute("data-notification-id");
@@ -2047,7 +1964,6 @@
     }
   });
 
-  /* ---- Passenger / shared: profile ---- */
   Router.register("profile", {
     title: "My profile",
     subtitle: "Your account details and preferences.",
@@ -2156,7 +2072,6 @@
           '<div class="card__body card__body--flush" id="driver-recent-trips">Loading…</div>' +
         '</section>';
 
-      // Stats
       try {
         const { data: trips } = await supabase
           .from("trips")
@@ -2173,7 +2088,6 @@
           statCard("✅", completed, "Completed", "success");
       } catch (err) { /* ignore */ }
 
-      // Vehicle
       const vehicleEl = document.getElementById("driver-vehicle");
       try {
         const { data: vehicles } = await supabase
@@ -2197,7 +2111,6 @@
         vehicleEl.innerHTML = '<p class="text-muted">Unable to load vehicle.</p>';
       }
 
-      // Recent trips
       const tripsEl = document.getElementById("driver-recent-trips");
       try {
         const { data: trips } = await supabase
@@ -2244,7 +2157,6 @@
     );
   }
 
-  /* ---- Driver: make bus available ---- */
   Router.register("make-bus-available", {
     title: "Make bus available",
     subtitle: "Publish a trip so passengers can see and book it.",
@@ -2288,7 +2200,6 @@
           '</div>' +
         '</section>';
 
-      // Populate selects
       const vehicleSelect = document.getElementById("trip-vehicle");
       const routeSelect = document.getElementById("trip-route");
       const terminalSelect = document.getElementById("trip-terminal");
@@ -2303,12 +2214,11 @@
         const myVehicles = vehicles.filter(function (v) { return v.assigned_driver_id === AppState.authUser.id; });
 
         vehicleSelect.innerHTML = '<option value="">Select a vehicle</option>' +
-          myVehicles.map(function (v) {
+          (myVehicles.map(function (v) {
             return '<option value="' + escapeHtml(v.id) + '">' +
               escapeHtml(v.registration_number) + ' (' + escapeHtml(v.capacity) + ' seats)' +
             '</option>';
-          }).join("") ||
-          '<option value="">No vehicle assigned</option>';
+          }).join("") || '<option value="">No vehicle assigned</option>');
 
         routeSelect.innerHTML = '<option value="">Select a route</option>' +
           routes.map(function (r) {
@@ -2326,14 +2236,12 @@
         Toast.error("Unable to load form data", err.message);
       }
 
-      // Default departure to now + 30 min
       const depInput = document.getElementById("trip-departure");
       if (depInput) {
         const d = new Date(Date.now() + 30 * 60000);
         depInput.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
       }
 
-      // Submit
       const form = document.getElementById("trip-form");
       form.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -2382,7 +2290,6 @@
     }
   });
 
-  /* ---- Driver: active trip ---- */
   Router.register("active-trip", {
     title: "Active trip",
     subtitle: "Start, track and end your current trip.",
@@ -2467,7 +2374,6 @@
         await endTrip(trip);
       });
 
-      // Start GPS for in_transit
       if (trip.status === "in_transit") {
         document.getElementById("gps-card").style.display = "";
         startGpsWatch(trip);
@@ -2490,7 +2396,6 @@
 
       await Data.logAudit("trip_started", "trip", trip.id, null);
 
-      // Notify passengers with bookings on this trip
       const { data: bookings } = await supabase
         .from("bookings")
         .select("passenger_id")
@@ -2553,7 +2458,6 @@
     }
   }
 
-  /* ---- Driver: my trips ---- */
   Router.register("driver-trips", {
     title: "My trips",
     subtitle: "All trips you have created.",
@@ -2583,7 +2487,6 @@
     }
   });
 
-  /* ---- Driver: scan ticket ---- */
   Router.register("scan-ticket", {
     title: "Scan ticket",
     subtitle: "Validate a passenger's QR ticket against the database.",
@@ -2640,7 +2543,6 @@
             return;
           }
 
-          // Mark as used + update booking
           const { error: updateError } = await supabase
             .from("tickets")
             .update({ status: "used", used_at: nowIso() })
@@ -2872,7 +2774,6 @@
         return;
       }
 
-      // Audit
       const auditEl = document.getElementById("admin-audit");
       try {
         const { data: logs } = await supabase
@@ -2982,7 +2883,6 @@
           );
         }).join("") + '</div>';
 
-        // Bind actions
         list.querySelectorAll("[data-approve]").forEach(function (btn) {
           btn.addEventListener("click", async function () {
             const id = btn.getAttribute("data-approve");
@@ -3013,7 +2913,6 @@
 
       await Data.logAudit("driver_" + status, "profile", driverId, null);
 
-      // Notify the driver
       await Notifications.create({
         recipient_id: driverId,
         title: "Account " + status,
@@ -3022,7 +2921,12 @@
         related_entity: driverId
       });
 
-      Toast.success("Driver " + status);
+      Toast.success(
+        "Driver " + status,
+        status === "approved"
+          ? "An approval email with the driver's company details has been queued."
+          : "The driver has been notified by email."
+      );
       Router.go("admin-drivers");
 
     } catch (err) {
@@ -3600,16 +3504,7 @@
 
   /* =======================================================================
      23–25. TICKETING / SEAT / WAITLIST
-     (Booking logic lives in section 14; helpers below support operations.)
      ======================================================================= */
-
-  /**
-   * Automatic seat release:
-   * Any booking still "reserved" whose trip departed longer ago than the
-   * boarding window is marked as no_show and the seat is released.
-   * In production this should run on a schedule (Supabase cron / Edge Function).
-   * Here we expose it so an admin can trigger it manually.
-   */
   async function runAutomaticSeatRelease() {
     if (!supabase) return 0;
 
@@ -3721,7 +3616,6 @@
     }
   };
 
-  /** Refresh the header badge + navigation counts. */
   async function refreshNotificationBadge() {
     try {
       const notifications = await Notifications.fetch();
@@ -3735,7 +3629,6 @@
     } catch (err) { /* silent */ }
   }
 
-  /** Subscribe to realtime notification inserts for the current user. */
   function subscribeToNotifications() {
     if (!supabase || !AppState.authUser) return;
     stopRealtimeChannel("notifications");
@@ -3779,7 +3672,6 @@
     title: "Leave feedback",
     subtitle: "Help improve TransitCare.",
     render: async function (container) {
-      // Find a completed trip the passenger was on
       try {
         const { data: bookings } = await supabase
           .from("bookings")
@@ -3864,7 +3756,6 @@
 
   /* =======================================================================
      28. AUDIT LOGS
-     (Written via Data.logAudit — exposed here for admin inspection.)
      ======================================================================= */
   Router.register("admin-audit", {
     title: "Audit log",
@@ -3919,9 +3810,8 @@
 
 
   /* =======================================================================
-     UI HELPERS: sidebar, header user, auth screen
+     UI HELPERS
      ======================================================================= */
-
   function showAuthScreen() {
     document.getElementById("auth-screen").classList.remove("is-hidden");
     document.getElementById("app-shell").classList.add("is-hidden");
@@ -3962,12 +3852,63 @@
 
 
   /* =======================================================================
+     VERIFICATION NOTICE HELPER
+     ======================================================================= */
+  function showVerificationNotice(email, role) {
+    const message = document.getElementById("auth-message");
+    if (!message) return;
+
+    const roleLabel =
+      role === "driver"   ? "Driver" :
+      role === "operator" ? "Operator" :
+                            "Passenger";
+
+    message.className = "alert alert--success";
+    message.innerHTML =
+      "<strong>Almost there — check your email.</strong>" +
+      "<span>We sent a verification link to <code>" + escapeHtml(email) + "</code>. " +
+      "Click the link to activate your " + escapeHtml(roleLabel.toLowerCase()) + " account.</span>" +
+      '<div class="mt-3" style="display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button type="button" class="button button--ghost button--small" id="resend-verification">' +
+          'Resend verification email' +
+        '</button>' +
+        '<button type="button" class="button button--ghost button--small" id="go-to-signin">' +
+          'Back to sign in' +
+        '</button>' +
+      '</div>';
+
+    const resend = document.getElementById("resend-verification");
+    if (resend) {
+      resend.addEventListener("click", async function () {
+        resend.disabled = true;
+        resend.innerHTML = '<span class="button__spinner"></span> Sending…';
+        try {
+          await Auth.resendVerification(email);
+          Toast.success("Verification email resent", "Check your inbox in a moment.");
+        } catch (err) {
+          Toast.error("Unable to resend", err.message || "Please try again later.");
+        } finally {
+          resend.disabled = false;
+          resend.textContent = "Resend verification email";
+        }
+      });
+    }
+
+    const back = document.getElementById("go-to-signin");
+    if (back) {
+      back.addEventListener("click", function () {
+        const signinTab = document.querySelector('[data-auth-mode="signin"]');
+        if (signinTab) signinTab.click();
+      });
+    }
+  }
+
+
+  /* =======================================================================
      FORM BINDINGS
      ======================================================================= */
-
   function bindAuthForms() {
 
-    /* ----- Tabs ----- */
     const tabs = document.querySelectorAll("[data-auth-mode]");
     const signinForm = document.getElementById("signin-form");
     const signupForm = document.getElementById("signup-form");
@@ -4004,7 +3945,6 @@
       });
     });
 
-    /* ----- Password show/hide ----- */
     document.querySelectorAll("[data-toggle-password]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         const input = document.getElementById(btn.getAttribute("data-toggle-password"));
@@ -4016,10 +3956,8 @@
       });
     });
 
-    /* ----- Password meter ----- */
     bindPasswordMeter("signup-password", "password-meter-bar", "password-hint");
 
-    /* ----- Driver notice ----- */
     document.querySelectorAll('input[name="signup-role"]').forEach(function (radio) {
       radio.addEventListener("change", function () {
         const notice = document.getElementById("driver-notice");
@@ -4049,9 +3987,37 @@
 
         try {
           await Auth.signIn(email, password);
-          // onAuthStateChange will handle the redirect
         } catch (err) {
-          setFormMessage("auth-message", "danger", err.message || "Unable to sign in.");
+          const msg = (err && err.message) ? err.message : "";
+          if (/email not confirmed|email not verified|confirm/i.test(msg)) {
+            const container = document.getElementById("auth-message");
+            container.className = "alert alert--warning";
+            container.innerHTML =
+              "<strong>Your email is not yet verified.</strong>" +
+              "<span>Please check your inbox for the verification link we sent to <code>" +
+                escapeHtml(email) + "</code>.</span>";
+
+            const resendBtn = document.createElement("button");
+            resendBtn.type = "button";
+            resendBtn.className = "button button--ghost button--small mt-3";
+            resendBtn.textContent = "Resend verification email";
+            resendBtn.addEventListener("click", async function () {
+              resendBtn.disabled = true;
+              resendBtn.textContent = "Sending…";
+              try {
+                await Auth.resendVerification(email);
+                Toast.success("Verification email resent");
+              } catch (e2) {
+                Toast.error("Unable to resend", e2.message);
+              } finally {
+                resendBtn.disabled = false;
+                resendBtn.textContent = "Resend verification email";
+              }
+            });
+            container.appendChild(resendBtn);
+          } else {
+            setFormMessage("auth-message", "danger", msg || "Unable to sign in.");
+          }
         } finally {
           submit.disabled = false;
           submit.textContent = "Sign in";
@@ -4067,23 +4033,23 @@
         setFormMessage("auth-message", null, "");
 
         const fullName = document.getElementById("signup-fullname").value.trim();
-        const email = document.getElementById("signup-email").value.trim();
-        const phone = document.getElementById("signup-phone").value.trim();
+        const email    = document.getElementById("signup-email").value.trim();
+        const phone    = document.getElementById("signup-phone").value.trim();
         const password = document.getElementById("signup-password").value;
-        const confirm = document.getElementById("signup-confirm").value;
-        const terms = document.getElementById("signup-terms").checked;
-        const role = document.querySelector('input[name="signup-role"]:checked').value;
+        const confirm  = document.getElementById("signup-confirm").value;
+        const terms    = document.getElementById("signup-terms").checked;
+        const role     = document.querySelector('input[name="signup-role"]:checked').value;
 
         let valid = true;
         if (!Validators.required(fullName)) { setFieldError("signup-fullname", "Enter your full name."); valid = false; }
-        if (!Validators.email(email)) { setFieldError("signup-email", "Enter a valid email address."); valid = false; }
+        if (!Validators.email(email))       { setFieldError("signup-email", "Enter a valid email address."); valid = false; }
         if (phone && !Validators.phone(phone)) { setFieldError("signup-phone", "Enter a valid phone number."); valid = false; }
         if (Validators.passwordStrength(password) < 3) {
           setFieldError("signup-password", "Password is too weak. Use 8+ characters with letters and numbers.");
           valid = false;
         }
         if (password !== confirm) { setFieldError("signup-confirm", "Passwords do not match."); valid = false; }
-        if (!terms) { setFieldError("signup-terms", "Please accept the terms to continue."); valid = false; }
+        if (!terms)               { setFieldError("signup-terms", "Please accept the terms to continue."); valid = false; }
         if (!valid) return;
 
         const submit = document.getElementById("signup-submit");
@@ -4091,10 +4057,25 @@
         submit.innerHTML = '<span class="button__spinner"></span> Creating account…';
 
         try {
-          await Auth.signUp({ fullName: fullName, email: email, phone: phone, password: password, role: role });
-          setFormMessage("auth-message", "success",
-            "Account created. Check your email to verify your address before signing in.");
+          const result = await Auth.signUp({
+            fullName: fullName,
+            email: email,
+            phone: phone,
+            password: password,
+            role: role
+          });
+
           signupForm.reset();
+
+          if (result.needsVerification) {
+            showVerificationNotice(email, role);
+          } else {
+            setFormMessage(
+              "auth-message",
+              "success",
+              "Account created. You are now signed in."
+            );
+          }
         } catch (err) {
           setFormMessage("auth-message", "danger", err.message || "Unable to create account.");
         } finally {
@@ -4191,14 +4172,17 @@
   /* =======================================================================
      30. BOOTSTRAP
      ======================================================================= */
-
   async function handleSignedIn(session) {
+    if (!session || !session.user) return;
+
+    if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
+      return;
+    }
+
     AppState.authUser = session.user;
 
-    // Fetch profile (may be null if the trigger hasn't created it yet)
     let profile = await Profile.fetch(session.user.id);
 
-    // If the profile is missing, create a minimal one from auth metadata.
     if (!profile && session.user.user_metadata) {
       const meta = session.user.user_metadata;
       await Auth.createProfileRow(session.user.id, {
@@ -4213,38 +4197,32 @@
     AppState.profile = profile;
     AppState.role = Profile.resolveRole(profile, session.user);
 
-    // Show the app
     showAppShell();
     updateHeaderUser();
     renderNavigation();
 
-    // Subscribe to notifications
     await refreshNotificationBadge();
     subscribeToNotifications();
 
-    // Route to the default view for this role
     const defaultView =
-      AppState.role === "admin" ? "admin-dashboard" :
+      AppState.role === "admin"    ? "admin-dashboard" :
       AppState.role === "operator" ? "operator-dashboard" :
-      AppState.role === "driver" ? "driver-dashboard" :
-      "home";
+      AppState.role === "driver"   ? "driver-dashboard" :
+                                     "home";
 
     Router.go(defaultView);
   }
 
   function wireGlobalUi() {
-    // Sidebar toggle
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.addEventListener("click", toggleSidebar);
 
-    // Close sidebar when clicking backdrop
     document.getElementById("app-shell").addEventListener("click", function (event) {
       const shell = document.getElementById("app-shell");
       if (!shell.classList.contains("sidebar-open")) return;
       if (event.target === shell) closeSidebar();
     });
 
-    // User menu
     const trigger = document.getElementById("user-menu-trigger");
     const dropdown = document.getElementById("user-menu-dropdown");
     if (trigger && dropdown) {
@@ -4260,7 +4238,6 @@
       });
     }
 
-    // Sign out
     const signoutButton = document.getElementById("signout-button");
     if (signoutButton) {
       signoutButton.addEventListener("click", function () {
@@ -4268,7 +4245,6 @@
       });
     }
 
-    // Header notifications shortcut
     const notifButton = document.getElementById("header-notifications-button");
     if (notifButton) {
       notifButton.addEventListener("click", function () {
@@ -4276,35 +4252,25 @@
       });
     }
 
-    // App version
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
   async function bootstrap() {
-    // 1. Initialise Supabase
     initSupabase();
 
-    // 2. Warn if not configured
     if (!IS_SUPABASE_CONFIGURED) {
       const warning = document.getElementById("config-warning");
       if (warning) warning.classList.remove("is-hidden");
     }
 
-    // 3. Bind auth forms
     bindAuthForms();
-
-    // 4. Wire global UI
     wireGlobalUi();
 
-    // 5. Show the auth screen until we know the session state
-    showAuthScreen();
-
     if (!supabase) {
-      // Without Supabase we cannot do anything further.
+      showAuthScreen();
       return;
     }
 
-    // 6. Check for a password-recovery link in the URL
     const hash = window.location.hash || "";
     if (hash.includes("type=recovery")) {
       document.getElementById("auth-screen").classList.remove("is-hidden");
@@ -4313,41 +4279,58 @@
       document.getElementById("reset-form").classList.remove("is-hidden");
     }
 
-    // 7. Handle auth state changes
+    let authEventHandled = false;
+
     supabase.auth.onAuthStateChange(async function (event, session) {
-      if (event === "SIGNED_OUT" || !session) {
-        resetState();
-        showAuthScreen();
-        return;
-      }
+      console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
       if (event === "PASSWORD_RECOVERY") {
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         document.getElementById("reset-form").classList.remove("is-hidden");
         document.getElementById("auth-screen").classList.remove("is-hidden");
         document.getElementById("app-shell").classList.add("is-hidden");
+        authEventHandled = true;
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        if (!AppState.profile || AppState.authUser === null) {
-          await handleSignedIn(session);
-        } else {
-          AppState.authUser = session.user;
-        }
+      if (event === "SIGNED_OUT" || !session) {
+        resetState();
+        showAuthScreen();
+        authEventHandled = true;
+        return;
+      }
+
+      if (event === "SIGNED_IN" ||
+          event === "INITIAL_SESSION" ||
+          event === "TOKEN_REFRESHED" ||
+          event === "USER_UPDATED") {
+        await handleSignedIn(session);
+        authEventHandled = true;
       }
     });
 
-    // 8. Restore an existing session
-    const session = await Auth.getSession();
-    if (session) {
-      await handleSignedIn(session);
-    } else {
-      showAuthScreen();
+    try {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        console.warn("[TransitCare] getSession error:", error.message);
+      }
+      const session = data ? data.session : null;
+
+      if (session) {
+        await handleSignedIn(session);
+      } else if (!authEventHandled) {
+        setTimeout(function () {
+          if (!authEventHandled && !AppState.authUser) {
+            showAuthScreen();
+          }
+        }, 250);
+      }
+    } catch (err) {
+      console.warn("[TransitCare] Initial session check failed:", err);
+      if (!authEventHandled) showAuthScreen();
     }
   }
 
-  // Kick off once the DOM is ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap);
   } else {
