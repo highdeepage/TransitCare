@@ -22,7 +22,7 @@
     BOARDING_WINDOW_MINUTES: 10,
     WAITLIST_OFFER_MINUTES: 5,
     RESCHEDULE_CUTOFF_MINUTES: 15,
-    SIGNIN_TIMEOUT_MS: 10000,
+    SIGNIN_TIMEOUT_MS: 12000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
@@ -78,6 +78,7 @@
 
   /* =======================================================================
      03. SUPABASE INITIALIZATION
+     No custom lock. No overrides. Supabase handles everything.
      ======================================================================= */
   let supabase = null;
 
@@ -98,28 +99,7 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true,
-
-            /* Use the native Web Locks API so session restore works,
-               but with a 4-second timeout that falls back to calling
-               acquire() directly. This prevents hangs on mobile Safari
-               and in-app webviews. */
-            lock: function (name, acquire) {
-              if (typeof navigator !== "undefined" &&
-                  navigator.locks &&
-                  typeof navigator.locks.request === "function") {
-                return Promise.race([
-                  navigator.locks.request(name, { mode: "exclusive" }, acquire),
-                  new Promise(function (_, reject) {
-                    setTimeout(function () { reject(new Error("Lock timeout")); }, 4000);
-                  })
-                ]).catch(function (err) {
-                  console.warn("[TransitCare] Lock fallback:", err.message);
-                  return acquire();
-                });
-              }
-              return acquire();
-            }
+            detectSessionInUrl: true
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
@@ -143,8 +123,7 @@
     notifications: [],
     channels: { notifications: null, tripLocations: null },
     gpsWatchId: null,
-    activeTrip: null,
-    cache: { terminals: null, operators: null, routes: null }
+    activeTrip: null
   };
 
   function resetState() {
@@ -154,7 +133,6 @@
     AppState.currentView = "home";
     AppState.notifications = [];
     AppState.activeTrip = null;
-    AppState.cache = { terminals: null, operators: null, routes: null };
     stopAllRealtime();
     stopGpsWatch();
   }
@@ -251,7 +229,7 @@
   function clearSupabaseStorage() {
     try {
       Object.keys(localStorage).forEach(function (key) {
-        if (key.indexOf("sb-") === 0 || key.indexOf("supabase") === 0) {
+        if (key.indexOf("sb-") === 0) {
           localStorage.removeItem(key);
         }
       });
@@ -721,7 +699,7 @@
 
 
   /* =======================================================================
-     12. ROLE-BASED NAVIGATION
+     12. NAVIGATION
      ======================================================================= */
   const NAVIGATION = {
     passenger: [
@@ -2579,7 +2557,6 @@
             status: "active"
           });
           if (error) throw error;
-          AppState.cache.terminals = null;
           Modal.close();
           Toast.success("Terminal added");
           Router.go("admin-terminals");
@@ -2647,7 +2624,6 @@
             status: "active"
           });
           if (error) throw error;
-          AppState.cache.routes = null;
           Modal.close();
           Toast.success("Route added");
           Router.go("admin-routes");
@@ -2934,7 +2910,7 @@
 
 
   /* =======================================================================
-     23–25. TICKETING / SEAT / WAITLIST
+     23. SEAT MANAGEMENT (auto-release helper)
      ======================================================================= */
   async function runAutomaticSeatRelease() {
     if (!supabase) return 0;
@@ -2962,27 +2938,9 @@
     return released;
   }
 
-  const Waitlist = {
-    async join(tripId) {
-      if (!supabase || !AppState.authUser) return null;
-      const { data, error } = await supabase.from("waitlist").insert({
-        passenger_id: AppState.authUser.id, trip_id: tripId, status: "waiting"
-      }).select().single();
-      if (error) throw error;
-      return data;
-    },
-    async listForTrip(tripId) {
-      if (!supabase) return [];
-      const { data, error } = await supabase.from("waitlist").select("*")
-        .eq("trip_id", tripId).eq("status", "waiting").order("created_at", { ascending: true });
-      if (error) throw error;
-      return data || [];
-    }
-  };
-
 
   /* =======================================================================
-     26. NOTIFICATIONS
+     24. NOTIFICATIONS
      ======================================================================= */
   const Notifications = {
     async fetch() {
@@ -3056,7 +3014,7 @@
 
 
   /* =======================================================================
-     27. FEEDBACK
+     25. FEEDBACK
      ======================================================================= */
   Router.register("feedback", {
     title: "Leave feedback",
@@ -3120,7 +3078,7 @@
 
 
   /* =======================================================================
-     28. AUDIT LOGS
+     26. AUDIT LOGS
      ======================================================================= */
   Router.register("admin-audit", {
     title: "Audit log",
@@ -3152,7 +3110,7 @@
 
 
   /* =======================================================================
-     29. ERROR HANDLING
+     27. ERROR HANDLING
      ======================================================================= */
   window.addEventListener("error", function (event) {
     console.error("[TransitCare] Unhandled error:", event.error || event.message);
@@ -3317,7 +3275,7 @@
       });
     });
 
-    /* ----- Sign in (with timeout recovery) ----- */
+    /* ----- Sign in ----- */
     if (signinForm) {
       signinForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -3499,7 +3457,7 @@
 
 
   /* =======================================================================
-     30. BOOTSTRAP — ROBUST SESSION RESTORE
+     28. BOOTSTRAP
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
@@ -3601,21 +3559,6 @@
       return;
     }
 
-    /* --------------------------------------------------------------------
-       ROBUST SESSION RESTORE
-
-       Supabase fires INITIAL_SESSION on page load. On some browsers it
-       fires first with a null session BEFORE the localStorage session
-       is loaded. Reacting to the first null logs the user out on every
-       refresh, which is the bug we are fixing.
-
-       Strategy:
-         • Ignore INITIAL_SESSION with null (wait for fallback).
-         • If INITIAL_SESSION carries a session, sign in immediately.
-         • After 1 second, ask getSession() directly as a fallback.
-         • Only show the login screen if BOTH paths return no session.
-       -------------------------------------------------------------------- */
-
     let resolved = false;
 
     function resolveInitial(session) {
@@ -3639,7 +3582,6 @@
         if (session && session.user) {
           resolveInitial(session);
         }
-        /* If null, do not resolve yet — wait for the fallback. */
         return;
       }
 
@@ -3667,9 +3609,6 @@
       }
     });
 
-    /* Fallback: 1 second after page load, ask getSession() directly.
-       This catches both older supabase-js versions that do not fire
-       INITIAL_SESSION and cases where the event is delayed. */
     setTimeout(async function () {
       if (resolved) return;
       try {
