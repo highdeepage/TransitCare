@@ -103,18 +103,27 @@
             /* Defensive lock override: finds the callback wherever
                Supabase puts it, calls it, and never leaves the promise
                pending. Fixes hangs on mobile Safari and in-app webviews. */
-            lock: function () {
-              try {
-                var args = Array.prototype.slice.call(arguments);
-                for (var i = 0; i < args.length; i++) {
-                  if (typeof args[i] === "function") {
-                    return Promise.resolve(args[i]());
-                  }
-                }
-              } catch (err) {
-                console.warn("[TransitCare] Lock acquire threw:", err);
+                        lock: function (name, acquire) {
+              /* Use the native Web Locks API when available so session
+                 restore from localStorage works correctly. Fall back to
+                 calling acquire() directly if it hangs (mobile Safari,
+                 in-app webviews) so the UI never freezes. */
+              if (typeof navigator !== "undefined" &&
+                  navigator.locks &&
+                  typeof navigator.locks.request === "function") {
+                return Promise.race([
+                  navigator.locks.request(name, { mode: "exclusive" }, acquire),
+                  new Promise(function (_, reject) {
+                    setTimeout(function () {
+                      reject(new Error("Lock timeout"));
+                    }, 4000);
+                  })
+                ]).catch(function (err) {
+                  console.warn("[TransitCare] Lock fallback:", err.message);
+                  return acquire();
+                });
               }
-              return Promise.resolve(null);
+              return acquire();
             }
           },
           realtime: { params: { eventsPerSecond: 5 } }
@@ -3586,7 +3595,7 @@
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
-  async function bootstrap() {
+    async function bootstrap() {
     initSupabase();
 
     bindAuthForms();
@@ -3606,56 +3615,99 @@
       return;
     }
 
-    let handled = false;
+    /* -----------------------------------------------------------------
+       Robust session restore.
+
+       Supabase fires INITIAL_SESSION on page load. On some browsers
+       it fires FIRST with a null session, THEN with the real session
+       loaded from localStorage. If we react to the first null, we log
+       the user out on every refresh.
+
+       This version:
+         • Waits for the FIRST session-bearing event OR a timeout.
+         • Only shows the auth screen once we are sure there is no
+           session — either the event fired with null, or getSession
+           also returned null.
+         • Handles future SIGNED_IN / SIGNED_OUT events normally.
+       ----------------------------------------------------------------- */
+
+    let initialHandled = false;
+    let firstEventSeen = false;
+
+    function handleInitial(session) {
+      if (initialHandled) return;
+      initialHandled = true;
+
+      if (session && session.user) {
+        handleSignedIn(session).catch(function (err) {
+          console.error("[TransitCare] handleSignedIn failed:", err);
+          showAuthScreen();
+        });
+      } else {
+        showAuthScreen();
+      }
+    }
 
     supabase.auth.onAuthStateChange(async function (event, session) {
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
+      if (event === "INITIAL_SESSION") {
+        firstEventSeen = true;
+        if (session && session.user) {
+          handleInitial(session);
+        }
+        /* If null, don't do anything yet — wait for the fallback below.
+           Supabase may fire another event or getSession may still succeed. */
+        return;
+      }
+
       if (event === "PASSWORD_RECOVERY") {
+        initialHandled = true;
         showAuthScreen();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
         if (resetForm) resetForm.classList.remove("is-hidden");
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_OUT" || !session) {
+      if (event === "SIGNED_OUT") {
+        initialHandled = true;
         resetState();
         showAuthScreen();
-        handled = true;
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "INITIAL_SESSION" ||
-          event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        try {
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
+        if (session && session.user && !AppState.authUser) {
           await handleSignedIn(session);
-        } catch (err) {
-          console.warn("[TransitCare] handleSignedIn failed:", err);
-          showAuthScreen();
         }
-        handled = true;
+        if (!initialHandled) initialHandled = true;
+        return;
       }
     });
 
-    try {
-      const session = await Auth.getSession();
-      if (session) {
-        await handleSignedIn(session);
-      } else if (!handled) {
-        showAuthScreen();
+    /* Fallback: after 1500ms, if no session has been restored, ask
+       getSession() directly. This covers older supabase-js versions
+       that do not fire INITIAL_SESSION, and browsers where the event
+       is delayed. */
+    setTimeout(async function () {
+      if (initialHandled) return;
+      try {
+        const result = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise(function (resolve) {
+            setTimeout(function () {
+              resolve({ data: { session: null }, __timeout: true });
+            }, 3000);
+          })
+        ]);
+        const session = result && result.data ? result.data.session : null;
+        handleInitial(session);
+      } catch (err) {
+        console.warn("[TransitCare] Fallback getSession failed:", err);
+        handleInitial(null);
       }
-    } catch (err) {
-      console.warn("[TransitCare] Initial session check failed:", err);
-      if (!handled) showAuthScreen();
-    }
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootstrap);
-  } else {
-    bootstrap();
+    }, 1500);
   }
 
 })();
