@@ -4171,7 +4171,7 @@
 
   /* =======================================================================
      30. BOOTSTRAP
-     ======================================================================= */
+  ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
 
@@ -4255,6 +4255,13 @@
     setText("app-version", "v" + TRANSITCARE_CONFIG.APP_VERSION);
   }
 
+  /* -----------------------------------------------------------------------
+     FIXED BOOTSTRAP
+     • Shows the loader immediately so the page never appears blank.
+     • Keeps the auth screen visible by default; only swaps to the app shell
+       when a valid session is found.
+     • Handles INITIAL_SESSION, getSession fallback, and PASSWORD_RECOVERY.
+     ----------------------------------------------------------------------- */
   async function bootstrap() {
     initSupabase();
 
@@ -4266,17 +4273,25 @@
     bindAuthForms();
     wireGlobalUi();
 
+    // Show the loader during the initial session check so the user
+    // never sees a blank page while we determine their auth state.
+    Loader.show("Preparing TransitCare…");
+
     if (!supabase) {
+      Loader.hide();
       showAuthScreen();
       return;
     }
 
+    // Password-recovery link — jump straight to the reset form.
     const hash = window.location.hash || "";
     if (hash.includes("type=recovery")) {
+      Loader.hide();
       document.getElementById("auth-screen").classList.remove("is-hidden");
       document.getElementById("app-shell").classList.add("is-hidden");
       document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
       document.getElementById("reset-form").classList.remove("is-hidden");
+      return;
     }
 
     let authEventHandled = false;
@@ -4285,6 +4300,7 @@
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
       if (event === "PASSWORD_RECOVERY") {
+        Loader.hide();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         document.getElementById("reset-form").classList.remove("is-hidden");
         document.getElementById("auth-screen").classList.remove("is-hidden");
@@ -4295,6 +4311,7 @@
 
       if (event === "SIGNED_OUT" || !session) {
         resetState();
+        Loader.hide();
         showAuthScreen();
         authEventHandled = true;
         return;
@@ -4304,11 +4321,20 @@
           event === "INITIAL_SESSION" ||
           event === "TOKEN_REFRESHED" ||
           event === "USER_UPDATED") {
-        await handleSignedIn(session);
+        try {
+          await handleSignedIn(session);
+        } catch (err) {
+          console.warn("[TransitCare] handleSignedIn failed:", err);
+          showAuthScreen();
+        } finally {
+          Loader.hide();
+        }
         authEventHandled = true;
       }
     });
 
+    // Fallback path: fetch the initial session directly.
+    // Covers older supabase-js versions that do not emit INITIAL_SESSION.
     try {
       const { data, error } = await supabase.auth.getSession();
       if (error) {
@@ -4318,15 +4344,15 @@
 
       if (session) {
         await handleSignedIn(session);
+        Loader.hide();
       } else if (!authEventHandled) {
-        setTimeout(function () {
-          if (!authEventHandled && !AppState.authUser) {
-            showAuthScreen();
-          }
-        }, 250);
+        // No session yet — hide loader and show the login screen.
+        Loader.hide();
+        showAuthScreen();
       }
     } catch (err) {
       console.warn("[TransitCare] Initial session check failed:", err);
+      Loader.hide();
       if (!authEventHandled) showAuthScreen();
     }
   }
