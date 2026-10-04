@@ -20,17 +20,10 @@
     GPS_UPDATE_INTERVAL_MS: 12000,
     GPS_STALE_THRESHOLD_MS: 60000,
     BOARDING_WINDOW_MINUTES: 10,
-    WAITLIST_OFFER_MINUTES: 5,
-    RESCHEDULE_CUTOFF_MINUTES: 15,
-    SIGNIN_TIMEOUT_MS: 10000,
 
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
-
-  const IS_SUPABASE_CONFIGURED =
-    !!TRANSITCARE_CONFIG.SUPABASE_URL &&
-    !!TRANSITCARE_CONFIG.SUPABASE_ANON_KEY;
 
 
   /* =======================================================================
@@ -77,17 +70,14 @@
 
 
   /* =======================================================================
-     03. SUPABASE INITIALIZATION — DEFAULT LOCK, NO OVERRIDE
+     03. SUPABASE INITIALIZATION
+     Simple lock override — this is the version that worked.
      ======================================================================= */
   let supabase = null;
 
   function initSupabase() {
-    if (!IS_SUPABASE_CONFIGURED) {
-      console.warn("[TransitCare] Supabase is not configured.");
-      return null;
-    }
     if (typeof window.supabase === "undefined" || !window.supabase.createClient) {
-      console.error("[TransitCare] Supabase library did not load from CDN.");
+      console.error("[TransitCare] Supabase library did not load.");
       return null;
     }
     try {
@@ -98,7 +88,10 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true
+            detectSessionInUrl: true,
+            lock: function (_name, acquire) {
+              return acquire();
+            }
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
@@ -224,16 +217,6 @@
   }
 
   function nowIso() { return new Date().toISOString(); }
-
-  function clearSupabaseStorage() {
-    try {
-      Object.keys(localStorage).forEach(function (key) {
-        if (key.indexOf("sb-") === 0) {
-          localStorage.removeItem(key);
-        }
-      });
-    } catch (e) { /* ignore */ }
-  }
 
 
   /* =======================================================================
@@ -540,7 +523,7 @@
 
 
   /* =======================================================================
-     10. AUTHENTICATION
+     10. AUTHENTICATION — simple, direct, no timeouts
      ======================================================================= */
   const Auth = {
 
@@ -578,66 +561,11 @@
       return { needsVerification: needsVerification, user: data.user, session: data.session };
     },
 
-    /* ---------------------------------------------------------------------
-       Sign-in that never hangs.
-
-       The strategy:
-         1. Fire signInWithPassword but do NOT block on its promise.
-         2. Wait up to 10 seconds for the promise to resolve.
-         3. If it resolves with an error → throw.
-         4. If it resolves with a user → return.
-         5. If it times out → check the session directly.
-         6. If a session exists → sign in using that session.
-         7. Otherwise → show a clear error.
-       --------------------------------------------------------------------- */
     async signIn(email, password) {
       if (!supabase) throw new Error("Supabase is not configured.");
-
-      /* Step 1: fire sign-in without awaiting */
-      let signInResult = null;
-      let signInError = null;
-      const signInPromise = supabase.auth.signInWithPassword({ email, password })
-        .then(function (r) {
-          if (r.error) signInError = r.error;
-          else signInResult = r.data;
-        })
-        .catch(function (e) {
-          signInError = e;
-        });
-
-      /* Step 2: race against a timeout */
-      await Promise.race([
-        signInPromise,
-        new Promise(function (resolve) { setTimeout(resolve, TRANSITCARE_CONFIG.SIGNIN_TIMEOUT_MS); })
-      ]);
-
-      /* Step 3: error? */
-      if (signInError) throw signInError;
-
-      /* Step 4: got a user? */
-      if (signInResult && signInResult.user) {
-        return signInResult;
-      }
-
-      /* Step 5: check the session directly */
-      try {
-        const sessionResult = await Promise.race([
-          supabase.auth.getSession(),
-          new Promise(function (resolve) { setTimeout(function () { resolve({ data: { session: null } }); }, 3000); })
-        ]);
-        const session = sessionResult && sessionResult.data ? sessionResult.data.session : null;
-
-        if (session && session.user) {
-          return { user: session.user, session: session };
-        }
-      } catch (e) {
-        console.warn("[TransitCare] Session fallback failed:", e);
-      }
-
-      /* Step 6: nothing worked */
-      const err = new Error("Sign-in is taking too long. Please try again.");
-      err.code = "SIGNIN_TIMEOUT";
-      throw err;
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      return data;
     },
 
     async resendVerification(email) {
@@ -667,16 +595,8 @@
     async signOut() {
       stopAllRealtime();
       if (supabase) {
-        try {
-          await Promise.race([
-            supabase.auth.signOut(),
-            new Promise(function (resolve) { setTimeout(resolve, 3000); })
-          ]);
-        } catch (err) {
-          console.warn("[TransitCare] Sign-out error (ignored):", err);
-        }
+        try { await supabase.auth.signOut(); } catch (err) { console.warn(err); }
       }
-      clearSupabaseStorage();
       resetState();
       showAuthScreen();
     },
@@ -685,13 +605,9 @@
       if (!supabase) return null;
       try {
         const { data, error } = await supabase.auth.getSession();
-        if (error) {
-          console.warn("[TransitCare] getSession error:", error.message);
-          return null;
-        }
+        if (error) return null;
         return data.session;
       } catch (err) {
-        console.warn("[TransitCare] getSession failed:", err);
         return null;
       }
     }
@@ -1572,7 +1488,7 @@
           '<span class="map-overlay__value">The driver has not started sharing location yet.</span></div>');
       }
     } catch (err) {
-      mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable. ' + escapeHtml(err.message) + '</div>';
+      mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable.</div>';
     }
   }
 
@@ -3074,7 +2990,7 @@
 
 
   /* =======================================================================
-     VERIFICATION NOTICE
+     VERIFICATION NOTICE HELPER
      ======================================================================= */
   function showVerificationNotice(email, role) {
     const message = document.getElementById("auth-message");
@@ -3198,26 +3114,9 @@
         submit.innerHTML = '<span class="button__spinner"></span> Signing in…';
 
         try {
-          const result = await Auth.signIn(email, password);
-
-          /* We have a user — take them straight into the app. */
-          if (result && result.user) {
-            const fakeSession = result.session || {
-              user: result.user,
-              access_token: null,
-              refresh_token: null
-            };
-            await handleSignedIn(fakeSession);
-          }
+          await Auth.signIn(email, password);
+          /* onAuthStateChange will handle the rest */
         } catch (err) {
-          if (err && err.code === "SIGNIN_TIMEOUT") {
-            setFormMessage("auth-message", "warning",
-              "Sign-in is taking too long. Reloading to try again…");
-            clearSupabaseStorage();
-            setTimeout(function () { window.location.reload(); }, 1200);
-            return;
-          }
-
           const msg = (err && err.message) ? err.message : "";
           if (/email not confirmed|email not verified|confirm/i.test(msg)) {
             const container = document.getElementById("auth-message");
@@ -3370,7 +3269,7 @@
 
 
   /* =======================================================================
-     28. BOOTSTRAP
+     24. BOOTSTRAP
      ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
@@ -3472,34 +3371,11 @@
       return;
     }
 
-    let resolved = false;
-
-    function resolveInitial(session) {
-      if (resolved) return;
-      resolved = true;
-
-      if (session && session.user) {
-        handleSignedIn(session).catch(function (err) {
-          console.error("[TransitCare] handleSignedIn failed:", err);
-          showAuthScreen();
-        });
-      } else {
-        showAuthScreen();
-      }
-    }
-
+    /* Register listener FIRST so we catch SIGNED_IN events. */
     supabase.auth.onAuthStateChange(async function (event, session) {
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
-      if (event === "INITIAL_SESSION") {
-        if (session && session.user) {
-          resolveInitial(session);
-        }
-        return;
-      }
-
       if (event === "PASSWORD_RECOVERY") {
-        resolved = true;
         showAuthScreen();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         const resetForm = document.getElementById("reset-form");
@@ -3507,37 +3383,44 @@
         return;
       }
 
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
+        if (session && session.user && !AppState.authUser) {
+          try {
+            await handleSignedIn(session);
+          } catch (err) {
+            console.error("[TransitCare] handleSignedIn failed:", err);
+          }
+        }
+        return;
+      }
+
       if (event === "SIGNED_OUT") {
-        resolved = true;
         resetState();
         showAuthScreen();
         return;
       }
 
-      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-        if (session && session.user && !AppState.authUser) {
+      if (event === "INITIAL_SESSION" && session && session.user && !AppState.authUser) {
+        try {
           await handleSignedIn(session);
+        } catch (err) {
+          console.error("[TransitCare] handleSignedIn failed:", err);
         }
-        if (!resolved) resolved = true;
       }
     });
 
-    setTimeout(async function () {
-      if (resolved) return;
-      try {
-        const result = await Promise.race([
-          supabase.auth.getSession(),
-          new Promise(function (resolve) {
-            setTimeout(function () { resolve({ data: { session: null } }); }, 3000);
-          })
-        ]);
-        const session = result && result.data ? result.data.session : null;
-        resolveInitial(session);
-      } catch (err) {
-        console.warn("[TransitCare] Fallback getSession failed:", err);
-        resolveInitial(null);
+    /* Then check for an existing session on page load. */
+    try {
+      const session = await Auth.getSession();
+      if (session && session.user && !AppState.authUser) {
+        await handleSignedIn(session);
+      } else if (!AppState.authUser) {
+        showAuthScreen();
       }
-    }, 1000);
+    } catch (err) {
+      console.warn("[TransitCare] Session check failed:", err);
+      if (!AppState.authUser) showAuthScreen();
+    }
   }
 
   if (document.readyState === "loading") {
