@@ -137,7 +137,25 @@
           auth: {
             persistSession: true,
             autoRefreshToken: true,
-            detectSessionInUrl: true
+            detectSessionInUrl: true,
+
+            /* -----------------------------------------------------------------
+               FIX: bypass the Web Locks API.
+
+               Supabase JS uses navigator.locks.request() to coordinate auth
+               state across browser tabs. On mobile Safari, in-app browsers
+               (Instagram / Facebook / TikTok webviews) and some Android
+               browsers, that lock can remain held indefinitely — causing
+               getSession() and onAuthStateChange() to hang forever. The
+               loader then never hides.
+
+               Passing a no-op lock function bypasses the issue entirely.
+               Safe for a single-tab app like TransitCare.
+               Reference: https://github.com/supabase/supabase-js/issues/881
+               ----------------------------------------------------------------- */
+            lock: function (_name, acquire) {
+              return acquire();
+            }
           },
           realtime: { params: { eventsPerSecond: 5 } }
         }
@@ -4171,7 +4189,7 @@
 
   /* =======================================================================
      30. BOOTSTRAP
-  ======================================================================= */
+     ======================================================================= */
   async function handleSignedIn(session) {
     if (!session || !session.user) return;
 
@@ -4256,11 +4274,14 @@
   }
 
   /* -----------------------------------------------------------------------
-     FIXED BOOTSTRAP
-     • Shows the loader immediately so the page never appears blank.
-     • Keeps the auth screen visible by default; only swaps to the app shell
-       when a valid session is found.
-     • Handles INITIAL_SESSION, getSession fallback, and PASSWORD_RECOVERY.
+     Robust bootstrap with safety timeout.
+
+     Sequence:
+       1. Show loader.
+       2. Register onAuthStateChange — will fire INITIAL_SESSION.
+       3. Call getSession() as a fallback — raced against a 6s timeout.
+       4. Whether the race wins, loses, or times out, the loader is always
+          hidden and the correct screen is shown.
      ----------------------------------------------------------------------- */
   async function bootstrap() {
     initSupabase();
@@ -4273,11 +4294,20 @@
     bindAuthForms();
     wireGlobalUi();
 
-    // Show the loader during the initial session check so the user
-    // never sees a blank page while we determine their auth state.
     Loader.show("Preparing TransitCare…");
 
+    // ---- Safety net: never let the loader hang longer than 8 seconds ----
+    let safetyFired = false;
+    const safetyTimer = setTimeout(function () {
+      if (safetyFired) return;
+      safetyFired = true;
+      console.warn("[TransitCare] Bootstrap safety timeout fired — hiding loader.");
+      Loader.hide();
+      if (!AppState.authUser) showAuthScreen();
+    }, 8000);
+
     if (!supabase) {
+      clearTimeout(safetyTimer);
       Loader.hide();
       showAuthScreen();
       return;
@@ -4286,6 +4316,7 @@
     // Password-recovery link — jump straight to the reset form.
     const hash = window.location.hash || "";
     if (hash.includes("type=recovery")) {
+      clearTimeout(safetyTimer);
       Loader.hide();
       document.getElementById("auth-screen").classList.remove("is-hidden");
       document.getElementById("app-shell").classList.add("is-hidden");
@@ -4300,6 +4331,7 @@
       console.log("[TransitCare] Auth event:", event, session ? "(session)" : "(no session)");
 
       if (event === "PASSWORD_RECOVERY") {
+        clearTimeout(safetyTimer);
         Loader.hide();
         document.querySelectorAll(".auth-form").forEach(function (f) { f.classList.add("is-hidden"); });
         document.getElementById("reset-form").classList.remove("is-hidden");
@@ -4311,6 +4343,7 @@
 
       if (event === "SIGNED_OUT" || !session) {
         resetState();
+        clearTimeout(safetyTimer);
         Loader.hide();
         showAuthScreen();
         authEventHandled = true;
@@ -4327,31 +4360,47 @@
           console.warn("[TransitCare] handleSignedIn failed:", err);
           showAuthScreen();
         } finally {
+          clearTimeout(safetyTimer);
           Loader.hide();
         }
         authEventHandled = true;
       }
     });
 
-    // Fallback path: fetch the initial session directly.
-    // Covers older supabase-js versions that do not emit INITIAL_SESSION.
+    // Fallback: race getSession() against a 5-second timeout.
+    // If it hangs (Web Locks issue, slow network, etc.) we move on anyway.
     try {
-      const { data, error } = await supabase.auth.getSession();
-      if (error) {
-        console.warn("[TransitCare] getSession error:", error.message);
+      const sessionResult = await Promise.race([
+        supabase.auth.getSession(),
+        new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve({ data: { session: null }, timedOut: true });
+          }, 5000);
+        })
+      ]);
+
+      if (sessionResult && sessionResult.timedOut) {
+        console.warn("[TransitCare] getSession timed out — showing login screen.");
+        clearTimeout(safetyTimer);
+        Loader.hide();
+        if (!authEventHandled) showAuthScreen();
+        return;
       }
-      const session = data ? data.session : null;
+
+      const session = sessionResult && sessionResult.data ? sessionResult.data.session : null;
 
       if (session) {
         await handleSignedIn(session);
+        clearTimeout(safetyTimer);
         Loader.hide();
       } else if (!authEventHandled) {
-        // No session yet — hide loader and show the login screen.
+        clearTimeout(safetyTimer);
         Loader.hide();
         showAuthScreen();
       }
     } catch (err) {
       console.warn("[TransitCare] Initial session check failed:", err);
+      clearTimeout(safetyTimer);
       Loader.hide();
       if (!authEventHandled) showAuthScreen();
     }
