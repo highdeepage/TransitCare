@@ -13,7 +13,59 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
-<link rel="stylesheet" href="style.css?v=2" />
+<link rel="stylesheet" href="style.css?v=3" />
+<!-- =========================================================
+     INLINE BUS ANIMATION
+     Kept inside index.html on purpose so it can never be
+     served from a stale CSS cache.
+     ========================================================= -->
+<style>
+  /* ---- Divider container ---- */
+  .hero-header__divider {
+    position: relative;
+    overflow: visible;
+  }
+
+  /* ---- The moving danfo bus ---- */
+  .hero-header__divider-bus {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 26px;
+    height: 15px;
+    z-index: 2;
+    pointer-events: none;
+    filter: drop-shadow(0 2px 4px rgba(26, 23, 48, 0.25));
+    animation: transitcare-bus-run 9s linear infinite;
+    will-change: transform, opacity;
+  }
+
+  @keyframes transitcare-bus-run {
+    0% {
+      transform: translate(-30px, -50%);
+      opacity: 0;
+    }
+    6% {
+      transform: translate(-30px, -50%);
+      opacity: 1;
+    }
+    94% {
+      transform: translate(calc(100% + 30px), -50%);
+      opacity: 1;
+    }
+    100% {
+      transform: translate(calc(100% + 30px), -50%);
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-header__divider-bus {
+      animation: none;
+      opacity: 0;
+    }
+  }
+</style>
 </head>
 <body>
 
@@ -444,7 +496,7 @@
 
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-<script src="script.js?v=2"></script>
+<script src="script.js?v=3"></script>
 
 </body>
 </html>
