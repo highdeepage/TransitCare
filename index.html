@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Eko TransitCare — Know Your Ride Before You Leave. Smart public/shared transportation coordination for Lagos." />
+<meta name="theme-color" content="#F0EBFF" />
+<title>Eko TransitCare — Know Your Ride Before You Leave</title>
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="style.css?v=4" />
+
+<!-- =========================================================
+     INLINE STYLES
+     Kept inside index.html on purpose so they can never be
+     served from a stale CSS cache. Includes the animated
+     Lagos danfo bus that travels along the hero divider.
+     ========================================================= -->
+<style>
+  /* ---- Divider container ---- */
+  .hero-header__divider {
+    position: relative;
+    overflow: visible;
+  }
+
+  /* ---- The moving danfo bus ---- */
+  .hero-header__divider-bus {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 40px;
+    height: 23px;
+    z-index: 2;
+    pointer-events: none;
+    transform: translateY(-50%);
+    filter: drop-shadow(0 2px 4px rgba(26, 23, 48, 0.25));
+
+    /* SPEED: lower number = faster. 7s is the current setting. */
+    animation: transitcare-bus-run 10s linear infinite;
+
+    will-change: left, opacity;
+  }
+
+  @keyframes transitcare-bus-run {
+    0%   { left: -48px;             opacity: 0; }
+    6%   { left: -48px;             opacity: 1; }
+    94%  { left: calc(100% + 8px);  opacity: 1; }
+    100% { left: calc(100% + 8px);  opacity: 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-header__divider-bus {
+      animation: none;
+      opacity: 0;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- =====================================================
+     BACKGROUND CANVAS
+     ===================================================== -->
+<div class="bg-canvas" aria-hidden="true">
+  <span class="bg-canvas__blob bg-canvas__blob--1"></span>
+  <span class="bg-canvas__blob bg-canvas__blob--2"></span>
+  <span class="bg-canvas__blob bg-canvas__blob--3"></span>
+  <span class="bg-canvas__grid"></span>
+</div>
+
+
+<!-- =====================================================
+     TOAST CONTAINER
+     ===================================================== -->
+<div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
+
+
+<!-- =====================================================
+     MODAL
+     ===================================================== -->
+<!-- =====================================================
+     GENERIC APP MODAL (used by Modal.open / Modal.confirm)
+     ===================================================== -->
+<div id="modal-backdrop" class="modal-backdrop is-hidden" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal__header">
+      <h2 id="modal-title" class="modal__title">Dialog</h2>
+      <button type="button" class="modal__close" id="modal-close-button" aria-label="Close dialog">&times;</button>
+    </header>
+    <div class="modal__body" id="modal-body"></div>
+    <footer class="modal__footer" id="modal-footer"></footer>
+  </div>
+</div>
+
+
+<!-- =====================================================
+     TERMS OF USE MODAL
+     ===================================================== -->
+<div id="terms-backdrop" class="modal-backdrop is-hidden" aria-hidden="true">
+  <div class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="terms-title">
+    <header class="modal__header">
+      <h2 id="terms-title" class="modal__title">Eko TransitCare — Terms of Use</h2>
+      <button type="button" class="modal__close" id="terms-close" aria-label="Close terms">&times;</button>
+    </header>
+    <div class="modal__body terms-body" id="terms-body">
+      <p class="terms-body__effective"><strong>Effective Date:</strong> 20/10/2026</p>
+
+      <h3>Welcome to Eko TransitCare!</h3>
+      <p>Eko TransitCare is a digital public transportation information platform designed to help commuters access information about participating buses, routes, terminals, departure times and journey updates.</p>
+      <p>By creating an account or using the platform, you agree to comply with these Terms of Use. Please read them carefully before proceeding.</p>
+
+      <h3>1. Acceptance of Terms</h3>
+      <p>By registering, accessing or using Eko TransitCare, you confirm that you have read, understood and agreed to these Terms of Use and our Privacy Policy. If you do not agree, please do not create an account or use the platform.</p>
+
+      <h3>2. Eligibility and Account Registration</h3>
+      <ul>
+        <li>You must provide accurate and complete information when creating an account.</li>
+        <li>You are responsible for maintaining the confidentiality of your login credentials and verification codes.</li>
+        <li>You must not create an account using another person's identity or information without authorisation.</li>
+        <li>You must promptly notify us if you suspect unauthorised access to your account.</li>
+        <li>You must not create multiple accounts for fraudulent or misleading purposes.</li>
+      </ul>
+
+      <h3>3. User Responsibilities</h3>
+      <p>As a user of Eko TransitCare, you agree to:</p>
+      <ul>
+        <li>Provide truthful and accurate information.</li>
+        <li>Use the platform for legitimate transportation-related purposes.</li>
+        <li>Treat drivers, passengers and transport operators respectfully.</li>
+        <li>Avoid submitting false reports, misleading feedback or fraudulent ratings.</li>
+        <li>Refrain from activities that disrupt, damage or compromise the platform.</li>
+        <li>Not misuse another user's personal information.</li>
+      </ul>
+
+      <h3>4. Transportation Information and Accuracy</h3>
+      <ul>
+        <li>Eko TransitCare provides information about participating transport operators, buses, routes, terminals and departure schedules.</li>
+        <li>Bus availability and departure information may change due to traffic, operational conditions, weather or other unforeseen circumstances.</li>
+        <li>Estimated arrival and departure times are provided for planning purposes and are not guaranteed.</li>
+        <li>GPS information may be real-time or simulated, depending on the available feature and deployment stage.</li>
+        <li>Users should verify important travel information where necessary before commencing their journeys.</li>
+      </ul>
+
+      <h3>5. Drivers and Transport Operators</h3>
+      <p>Drivers and participating transport operators are expected to:</p>
+      <ul>
+        <li>Provide accurate vehicle and journey information.</li>
+        <li>Update bus availability and departure information honestly.</li>
+        <li>Use the platform responsibly.</li>
+        <li>Treat passengers fairly and professionally.</li>
+        <li>Avoid misleading passengers about routes, schedules or vehicle availability.</li>
+      </ul>
+      <p>Eko TransitCare does not automatically guarantee the conduct, performance or service quality of independent transport operators.</p>
+
+      <h3>6. Passenger Feedback and Ratings</h3>
+      <ul>
+        <li>Users may submit feedback and ratings based on their experiences.</li>
+        <li>Feedback must be honest, respectful and relevant.</li>
+        <li>Harassment, abusive language, false accusations and deliberately misleading reviews are prohibited.</li>
+        <li>Eko TransitCare reserves the right to review and remove content that violates these Terms or applicable laws.</li>
+      </ul>
+
+      <h3>7. Location Services</h3>
+      <p>Certain features may require access to your device's location.</p>
+      <ul>
+        <li>Location access is subject to your device permissions.</li>
+        <li>You may disable location access through your device settings.</li>
+        <li>Disabling location services may affect features that depend on location information.</li>
+        <li>Location information will be handled in accordance with our Privacy Policy.</li>
+      </ul>
+
+      <h3>8. Platform Availability</h3>
+      <p>We aim to keep Eko TransitCare accessible and operational. However:</p>
+      <ul>
+        <li>The platform may occasionally be unavailable due to maintenance, technical issues or network interruptions.</li>
+        <li>We reserve the right to modify, suspend or discontinue features when necessary.</li>
+        <li>We will make reasonable efforts to maintain and improve the platform.</li>
+      </ul>
+
+      <h3>9. Prohibited Activities</h3>
+      <p>Users must not:</p>
+      <ul>
+        <li>Attempt to hack, disrupt or gain unauthorised access to the platform.</li>
+        <li>Upload malicious software or harmful content.</li>
+        <li>Manipulate bus availability, schedules, ratings or journey information.</li>
+        <li>Impersonate another user, driver or transport operator.</li>
+        <li>Use the platform for illegal, fraudulent or deceptive activities.</li>
+      </ul>
+
+      <h3>10. Account Suspension and Termination</h3>
+      <p>Eko TransitCare reserves the right to restrict, suspend or terminate accounts involved in fraudulent activities, misuse, security violations or serious breaches of these Terms.</p>
+      <p>Users may request account deletion through the designated support channel, subject to applicable legal and record-retention requirements.</p>
+
+      <h3>11. Limitation of Responsibility</h3>
+      <p>Eko TransitCare is a transportation information platform and does not necessarily operate, own or control the buses and vehicles listed by independent transport providers.</p>
+      <p>We are not a substitute for the independent judgement of passengers when making travel decisions. We do not guarantee uninterrupted services, exact departure times, vehicle availability or the safety and conduct of independent operators.</p>
+      <p>Nothing in these Terms excludes any responsibility that cannot lawfully be excluded under applicable Nigerian law.</p>
+
+      <h3>12. Changes to These Terms</h3>
+      <p>We may update these Terms of Use when necessary. Updated versions will be made available on the platform, together with their effective dates. Where required, users will be notified of significant changes.</p>
+
+      <h3>13. Governing Law</h3>
+      <p>These Terms shall be governed by and interpreted in accordance with the laws of the Federal Republic of Nigeria.</p>
+
+      <h3>14. Contact Us</h3>
+      <p>For enquiries, complaints or assistance concerning these Terms, contact:</p>
+      <ul>
+        <li><strong>Platform:</strong> Eko TransitCare</li>
+        <li><strong>Website:</strong> <a href="https://ekotransitcare.vercel.app/" target="_blank" rel="noopener">https://ekotransitcare.vercel.app/</a></li>
+        <li><strong>Email:</strong> <a href="mailto:idgreatest1@gmail.com">idgreatest1@gmail.com</a></li>
+        <li><strong>Phone:</strong> <a href="tel:08035961831">08035961831</a></li>
+      </ul>
+
+      <p class="terms-body__accept">By selecting "I Agree" during registration, you confirm that you accept these Terms of Use.</p>
+    </div>
+    <footer class="modal__footer">
+      <button type="button" class="button button--ghost" data-modal-action="cancel" id="terms-cancel">Close</button>
+      <button type="button" class="button button--primary" id="terms-agree">I Agree</button>
+    </footer>
+  </div>
+</div>
+
+
+<!-- =====================================================
+     GLOBAL LOADER
+     ===================================================== -->
+<div id="global-loader" class="global-loader is-hidden" aria-hidden="true">
+  <div class="spinner" aria-hidden="true"></div>
+  <p class="global-loader__text" id="global-loader-text">Loading…</p>
+</div>
+
+
+<!-- =====================================================
+     AUTH SCREEN
+     ===================================================== -->
+<div id="auth-screen" class="auth-screen">
+
+  <!-- ---------- LEFT: HERO ---------- -->
+  <section class="auth-hero" aria-label="About Eko TransitCare">
+    <div class="auth-hero__inner">
+
+      <header class="hero-header">
+        <div class="hero-header__brand">
+          <span class="hero-header__icon" aria-hidden="true">
+            <span class="hero-header__icon-glyph">🚌</span>
+            <span class="hero-header__icon-ring"></span>
+          </span>
+          <h1 class="hero-header__name">Eko TransitCare</h1>
+        </div>
+
+        <div class="hero-header__divider" role="presentation">
+          <span class="hero-header__divider-line"></span>
+          <span class="hero-header__divider-dot"></span>
+          <span class="hero-header__divider-line"></span>
+
+          <!-- Mini Lagos danfo bus — inline SVG -->
+          <svg class="hero-header__divider-bus"
+               width="40" height="23" viewBox="0 0 26 15"
+               xmlns="http://www.w3.org/2000/svg"
+               aria-hidden="true">
+            <rect x="1" y="2.5" width="24" height="9" rx="1.6"
+                  fill="#FFC800" stroke="#1A1730" stroke-width="1"/>
+            <rect x="20.5" y="4" width="3.2" height="3.5" rx="0.4" fill="#1A1730"/>
+            <rect x="15.4" y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
+            <rect x="10.4" y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
+            <rect x="5.4"  y="4" width="3.6" height="3.5" rx="0.4" fill="#1A1730"/>
+            <rect x="1" y="8.5" width="24" height="1.2" fill="#1A1730"/>
+            <rect x="23.5" y="10" width="1.3" height="0.9"
+                  fill="#FFF7CC" stroke="#1A1730" stroke-width="0.3"/>
+            <circle cx="6.5"  cy="12" r="2.2" fill="#1A1730"/>
+            <circle cx="6.5"  cy="12" r="0.8" fill="#94A3B8"/>
+            <circle cx="19.5" cy="12" r="2.2" fill="#1A1730"/>
+            <circle cx="19.5" cy="12" r="0.8" fill="#94A3B8"/>
+          </svg>
+        </div>
+
+        <div class="hero-header__body">
+        <p class="hero-header__lede">
+          A smart companion for Lagos commuters. See the bus, the terminal, the route,
+          the departure time, the fare and the seats — before you leave home.
+        </p>
+
+        <!-- Lottie hero animation -->
+        <div class="hero-lottie" id="hero-lottie" aria-hidden="true"></div>
+
+        <p class="hero-header__tagline">Know Your Ride Before You Leave.</p>
+      </div>
+      </header>
+
+      <!-- News ticker — admin-editable -->
+      <section class="news-ticker" id="news-ticker" aria-label="Transport news" style="display:none;">
+        <div class="news-ticker__label">📢 Transport update</div>
+        <div class="news-ticker__track">
+          <p class="news-ticker__message" id="news-ticker-message"></p>
+        </div>
+      </section>
+      
+      <ul class="hero-features">
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">📍</span>
+          <div>
+            <p class="hero-features__label">Real terminals &amp; routes</p>
+            <p class="hero-features__desc">Data from participating operators across Lagos</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">🕒</span>
+          <div>
+            <p class="hero-features__label">Live departure status</p>
+            <p class="hero-features__desc">Know if your bus is scheduled, boarding or departed</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">💺</span>
+          <div>
+            <p class="hero-features__label">Seats before you arrive</p>
+            <p class="hero-features__desc">Reserve, pay and receive a QR ticket instantly</p>
+          </div>
+        </li>
+        <li class="hero-features__item">
+          <span class="hero-features__icon" aria-hidden="true">🛰️</span>
+          <div>
+            <p class="hero-features__label">Track an active bus</p>
+            <p class="hero-features__desc">Live map, ETA, and next available trip</p>
+          </div>
+        </li>
+      </ul>
+
+      <footer class="hero-footer">
+        <span class="hero-footer__label">Powered by</span>
+        <strong class="hero-footer__brand">Ajigbeda Girls Digital Queens</strong>
+      </footer>
+
+    </div>
+  </section>
+
+
+  <!-- ---------- RIGHT: AUTH CARD ---------- -->
+  <section class="auth-panel" aria-label="Account access">
+    <div class="auth-panel__inner">
+
+      <div class="auth-card">
+
+        <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+          <button type="button" class="auth-tab is-active" id="tab-signin" role="tab"
+                  aria-selected="true" aria-controls="panel-signin" data-auth-mode="signin">
+            Sign in
+          </button>
+          <button type="button" class="auth-tab" id="tab-signup" role="tab"
+                  aria-selected="false" aria-controls="panel-signup" data-auth-mode="signup">
+            Create account
+          </button>
+          <span class="auth-tabs__indicator" aria-hidden="true"></span>
+        </div>
+
+        <div id="config-warning" class="alert alert--warning is-hidden" role="alert">
+          <strong>Setup required.</strong>
+          <span>Add your Supabase URL and anon key at the top of <code>script.js</code>.</span>
+        </div>
+
+        <div id="auth-message" class="alert is-hidden" role="alert"></div>
+
+        <!-- ---------------- SIGN IN ---------------- -->
+        <form id="signin-form" class="auth-form" novalidate>
+          <h2 class="auth-form__title">Welcome back</h2>
+          <p class="auth-form__subtitle">Sign in to see your trips, tickets and notifications.</p>
+
+          <div class="field">
+            <label for="signin-email">Email address</label>
+            <input type="email" id="signin-email" name="email" autocomplete="email"
+                   placeholder="you@example.com" required />
+            <p class="field__error" data-error-for="signin-email"></p>
+          </div>
+
+          <div class="field">
+            <label for="signin-password">Password</label>
+            <div class="field__password">
+              <input type="password" id="signin-password" name="password"
+                     autocomplete="current-password" placeholder="Your password" required />
+              <button type="button" class="field__toggle" data-toggle-password="signin-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="signin-password"></p>
+          </div>
+
+          <div class="auth-form__row">
+            <label class="checkbox">
+              <input type="checkbox" id="signin-remember" checked />
+              <span>Keep me signed in</span>
+            </label>
+            <button type="button" class="link-button" id="forgot-password-button">
+              Forgot password?
+            </button>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="signin-submit">
+            Sign in
+          </button>
+
+          <p class="auth-alt">
+            Passenger?
+            <button type="button" class="link-button" id="signin-use-phone">Sign in with a WhatsApp code instead</button>
+          </p>
+        </form>
+
+        <!-- ---------------- SIGN UP ---------------- -->
+        <form id="signup-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Create your account</h2>
+          <p class="auth-form__subtitle">Choose how you will use TransitCare.</p>
+
+          <fieldset class="role-picker">
+            <legend class="role-picker__legend">I am a…</legend>
+            <div class="role-picker__options">
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="passenger" checked />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">👤</span>
+                  <span class="role-option__label">Passenger</span>
+                  <span class="role-option__hint">Find &amp; book buses</span>
+                </span>
+              </label>
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="driver" />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">👨‍✈️</span>
+                  <span class="role-option__label">Driver</span>
+                  <span class="role-option__hint">Run scheduled trips</span>
+                </span>
+              </label>
+              <label class="role-option">
+                <input type="radio" name="signup-role" value="operator" />
+                <span class="role-option__card">
+                  <span class="role-option__icon" aria-hidden="true">🏢</span>
+                  <span class="role-option__label">Operator</span>
+                  <span class="role-option__hint">Manage a fleet</span>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div id="driver-notice" class="alert alert--info is-hidden">
+            <strong>Driver accounts require approval.</strong>
+            <span>After verifying your email, an administrator will review your account.</span>
+          </div>
+
+          <div class="field">
+            <label for="signup-fullname">Full name</label>
+            <input type="text" id="signup-fullname" name="full_name" autocomplete="name"
+                   placeholder="e.g. Amina Bello" required />
+            <p class="field__error" data-error-for="signup-fullname"></p>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="signup-email">Email address</label>
+              <input type="email" id="signup-email" name="email" autocomplete="email"
+                     placeholder="you@example.com" required />
+              <p class="field__error" data-error-for="signup-email"></p>
+            </div>
+            <div class="field">
+              <label for="signup-phone">Phone number</label>
+              <input type="tel" id="signup-phone" name="phone" autocomplete="tel"
+                     placeholder="0803 000 0000" />
+              <p class="field__error" data-error-for="signup-phone"></p>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="signup-password">Password</label>
+            <div class="field__password">
+              <input type="password" id="signup-password" name="password"
+                     autocomplete="new-password" placeholder="At least 8 characters" required />
+              <button type="button" class="field__toggle" data-toggle-password="signup-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <div class="password-meter" aria-hidden="true">
+              <span class="password-meter__bar" id="password-meter-bar"></span>
+            </div>
+            <p class="field__hint" id="password-hint">Use 8+ characters with letters and numbers.</p>
+            <p class="field__error" data-error-for="signup-password"></p>
+          </div>
+
+          <div class="field">
+            <label for="signup-confirm">Confirm password</label>
+            <div class="field__password">
+              <input type="password" id="signup-confirm" name="confirm_password"
+                     autocomplete="new-password" placeholder="Repeat your password" required />
+              <button type="button" class="field__toggle" data-toggle-password="signup-confirm"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="signup-confirm"></p>
+          </div>
+
+          <label class="checkbox checkbox--terms">
+          <input type="checkbox" id="signup-terms" required />
+          <span>
+            I agree to the
+            <button type="button" class="link-button" id="open-terms-button">TransitCare Terms of Use</button>
+            and Privacy Policy.
+          </span>
+        </label>
+        <p class="field__error" data-error-for="signup-terms"></p>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="signup-submit">
+            Create account
+          </button>
+
+          <p class="auth-alt" id="signup-phone-alt">
+            Passenger?
+            <button type="button" class="link-button" id="signup-use-phone">Sign up with your WhatsApp number instead</button>
+          </p>
+        </form>
+
+        <!-- ---------------- FORGOT PASSWORD ---------------- -->
+        <form id="forgot-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Reset your password</h2>
+          <p class="auth-form__subtitle">Enter your email and we will send you a secure reset link.</p>
+
+          <div class="field">
+            <label for="forgot-email">Email address</label>
+            <input type="email" id="forgot-email" name="email" autocomplete="email"
+                   placeholder="you@example.com" required />
+            <p class="field__error" data-error-for="forgot-email"></p>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="forgot-submit">
+            Send reset link
+          </button>
+          <button type="button" class="button button--ghost button--block mt-3" id="forgot-back-button">
+            Back to sign in
+          </button>
+        </form>
+
+        <!-- ---------------- RESET PASSWORD ---------------- -->
+        <form id="reset-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title">Choose a new password</h2>
+          <p class="auth-form__subtitle">Your reset link was verified. Set a new password below.</p>
+
+          <div class="field">
+            <label for="reset-password">New password</label>
+            <div class="field__password">
+              <input type="password" id="reset-password" autocomplete="new-password"
+                     placeholder="At least 8 characters" required />
+              <button type="button" class="field__toggle" data-toggle-password="reset-password"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="reset-password"></p>
+          </div>
+
+          <div class="field">
+            <label for="reset-confirm">Confirm new password</label>
+            <div class="field__password">
+              <input type="password" id="reset-confirm" autocomplete="new-password"
+                     placeholder="Repeat your new password" required />
+              <button type="button" class="field__toggle" data-toggle-password="reset-confirm"
+                      aria-label="Show password">Show</button>
+            </div>
+            <p class="field__error" data-error-for="reset-confirm"></p>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="reset-submit">
+            Update password
+          </button>
+        </form>
+
+        <!-- ---------------- PHONE / WHATSAPP OTP ---------------- -->
+        <form id="phone-form" class="auth-form is-hidden" novalidate>
+          <h2 class="auth-form__title" id="phone-title">Continue with WhatsApp</h2>
+          <p class="auth-form__subtitle" id="phone-subtitle">We will send a 6-digit code to your WhatsApp number.</p>
+
+          <div id="phone-step-details">
+            <div class="field" id="phone-name-field">
+              <label for="phone-fullname">Full name</label>
+              <input type="text" id="phone-fullname" autocomplete="name" placeholder="e.g. Amina Bello" />
+              <p class="field__error" data-error-for="phone-fullname"></p>
+            </div>
+
+            <div class="field">
+              <label for="phone-number">WhatsApp number</label>
+              <input type="tel" id="phone-number" autocomplete="tel" placeholder="0803 000 0000" />
+              <p class="field__hint">Nigerian numbers: 0803… or +234803…. For other countries, start with + and the country code.</p>
+              <p class="field__error" data-error-for="phone-number"></p>
+            </div>
+
+            <div id="phone-terms-wrap">
+              <label class="checkbox checkbox--terms">
+                <input type="checkbox" id="phone-terms" />
+                <span>
+                  I agree to the
+                  <button type="button" class="link-button" data-open-terms>TransitCare Terms of Use</button>
+                  and Privacy Policy.
+                </span>
+              </label>
+              <p class="field__error" data-error-for="phone-terms"></p>
+            </div>
+          </div>
+
+          <div id="phone-step-otp" class="is-hidden">
+            <div class="field">
+              <label for="phone-otp">Verification code</label>
+              <input type="text" id="phone-otp" class="otp-input" inputmode="numeric"
+                     autocomplete="one-time-code" maxlength="8" placeholder="······" />
+              <p class="field__hint" id="phone-otp-hint">Enter the code we sent to your WhatsApp.</p>
+              <p class="field__error" data-error-for="phone-otp"></p>
+            </div>
+          </div>
+
+          <button type="submit" class="button button--primary button--block button--glow" id="phone-submit">
+            Send code on WhatsApp
+          </button>
+
+          <div class="auth-form__row mt-3" id="phone-otp-actions" style="display:none;">
+            <button type="button" class="link-button" id="phone-resend" disabled>Resend code</button>
+            <button type="button" class="link-button" id="phone-change">Change number</button>
+          </div>
+
+          <button type="button" class="button button--ghost button--block mt-3" id="phone-back">
+            Use email instead
+          </button>
+        </form>
+
+        <p class="auth-card__footer">
+          Powered by <strong>Ajigbeda Girls Digital Queens</strong>
+        </p>
+
+      </div>
+
+    </div>
+  </section>
+</div>
+
+
+<!-- =====================================================
+     APP SHELL
+     ===================================================== -->
+<div id="app-shell" class="app-shell is-hidden">
+
+  <header class="app-header">
+    <button type="button" class="app-header__menu" id="sidebar-toggle"
+            aria-label="Toggle navigation" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+
+    <a class="app-header__brand" href="#/home" data-nav-link>
+      <span class="app-header__brand-mark" aria-hidden="true">🚌</span>
+      <span class="app-header__brand-text">
+        <strong>Eko TransitCare</strong>
+        <span class="app-header__brand-divider" aria-hidden="true"></span>
+        <small>Know Your Ride Before You Leave</small>
+      </span>
+    </a>
+
+    <div class="app-header__actions">
+      <button type="button" class="icon-button" id="header-notifications-button"
+              aria-label="Notifications" title="Notifications">
+        <span aria-hidden="true">🔔</span>
+        <span class="icon-button__badge is-hidden" id="notification-badge">0</span>
+      </button>
+
+      <div class="user-menu">
+        <button type="button" class="user-menu__trigger" id="user-menu-trigger"
+                aria-haspopup="true" aria-expanded="false">
+          <span class="avatar" id="header-avatar">–</span>
+          <span class="user-menu__meta">
+            <strong id="header-user-name">…</strong>
+            <small id="header-user-role">…</small>
+          </span>
+          <span aria-hidden="true">▾</span>
+        </button>
+        <div class="user-menu__dropdown is-hidden" id="user-menu-dropdown" role="menu">
+          <button type="button" class="user-menu__item" data-nav-link data-view="profile" role="menuitem">
+            <span aria-hidden="true">👤</span> My profile
+          </button>
+          <button type="button" class="user-menu__item" data-nav-link data-view="notifications" role="menuitem">
+            <span aria-hidden="true">🔔</span> Notifications
+          </button>
+          <hr class="user-menu__divider" />
+          <button type="button" class="user-menu__item user-menu__item--danger" id="signout-button" role="menuitem">
+            <span aria-hidden="true">⎋</span> Sign out
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-body">
+    <aside class="app-sidebar" id="app-sidebar" aria-label="Main navigation">
+      <nav class="app-nav" id="app-nav"></nav>
+      <div class="app-sidebar__footer">
+        <p class="app-sidebar__credit">Powered by <strong>Ajigbeda Girls Digital Queens</strong></p>
+        <p class="app-sidebar__version" id="app-version">v1.0 · Phase 2</p>
+      </div>
+    </aside>
+
+    <main class="app-main" id="view-root" tabindex="-1"></main>
+  </div>
+
+  <nav class="app-bottom-nav" id="app-bottom-nav" aria-label="Primary navigation"></nav>
+</div>
+
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js"></script>
+<script src="script.js?v=4"></script>
+
+</body>
+</html>
