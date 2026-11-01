@@ -25,3 +25,18 @@ How it works in the app
 
 If WhatsApp isn't set up yet, users will see "WhatsApp codes are not
 available right now. Please use email instead."
+
+
+## Email confirmation emails not arriving
+Supabase's built-in email sender is only for testing: it is heavily rate-limited
+and (on newer projects) only delivers to your own team members' addresses.
+For real users set up custom SMTP:
+
+1. Verify a sending domain in Resend (Domains → Add domain, add the DNS records).
+   `onboarding@resend.dev` can only email your own Resend account address.
+2. Supabase → Authentication → Emails → SMTP Settings → enable custom SMTP:
+   host `smtp.resend.com`, port `465`, username `resend`, password = your Resend API key,
+   sender e.g. `no-reply@yourdomain.com`, sender name `Eko TransitCare`.
+3. Authentication → Sign In / Providers → Email: keep "Confirm email" ON.
+4. Authentication → URL Configuration: set Site URL to https://ekotransitcare.vercel.app
+   and add the same URL under Redirect URLs.

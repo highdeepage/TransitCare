@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
-<link rel="stylesheet" href="style.css?v=4" />
+<link rel="stylesheet" href="style.css?v=5" />
 
 <!-- =========================================================
      INLINE STYLES
@@ -448,6 +448,14 @@
             <span>After verifying your email, an administrator will review your account.</span>
           </div>
 
+          <div id="signup-method" class="method-toggle" role="group" aria-label="Verify my account with">
+            <span class="method-toggle__label">Verify my account with</span>
+            <div class="method-toggle__options">
+              <button type="button" class="method-toggle__btn is-active" data-method="email">✉️ Email</button>
+              <button type="button" class="method-toggle__btn" data-method="whatsapp">💬 WhatsApp code</button>
+            </div>
+          </div>
+
           <div class="field">
             <label for="signup-fullname">Full name</label>
             <input type="text" id="signup-fullname" name="full_name" autocomplete="name"
@@ -509,11 +517,6 @@
           <button type="submit" class="button button--primary button--block button--glow" id="signup-submit">
             Create account
           </button>
-
-          <p class="auth-alt" id="signup-phone-alt">
-            Passenger?
-            <button type="button" class="link-button" id="signup-use-phone">Sign up with your WhatsApp number instead</button>
-          </p>
         </form>
 
         <!-- ---------------- FORGOT PASSWORD ---------------- -->
@@ -572,6 +575,15 @@
         <form id="phone-form" class="auth-form is-hidden" novalidate>
           <h2 class="auth-form__title" id="phone-title">Continue with WhatsApp</h2>
           <p class="auth-form__subtitle" id="phone-subtitle">We will send a 6-digit code to your WhatsApp number.</p>
+
+          <div id="phone-method" class="method-toggle" role="group" aria-label="Verify my account with">
+            <span class="method-toggle__label">Verify my account with</span>
+            <div class="method-toggle__options">
+              <button type="button" class="method-toggle__btn" data-method="email">✉️ Email</button>
+              <button type="button" class="method-toggle__btn is-active" data-method="whatsapp">💬 WhatsApp code</button>
+            </div>
+          </div>
+
 
           <div id="phone-step-details">
             <div class="field" id="phone-name-field">
@@ -706,7 +718,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js"></script>
-<script src="script.js?v=4"></script>
+<script src="script.js?v=5"></script>
 
 </body>
 </html>

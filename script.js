@@ -3459,7 +3459,7 @@
     // WhatsApp sign-up is offered to passengers only.
     function syncPhoneAltVisibility() {
       const checked = document.querySelector('input[name="signup-role"]:checked');
-      const alt = document.getElementById("signup-phone-alt");
+      const alt = document.getElementById("signup-method");
       if (alt) alt.style.display = (!checked || checked.value === "passenger") ? "" : "none";
     }
     document.querySelectorAll('input[name="signup-role"]').forEach(function (radio) {
@@ -3640,6 +3640,10 @@
       const termsWrap = document.getElementById("phone-terms-wrap");
       if (nameField) nameField.style.display = isSignup ? "" : "none";
       if (termsWrap) termsWrap.style.display = isSignup ? "" : "none";
+      const methodBox = document.getElementById("phone-method");
+      const backBtn = document.getElementById("phone-back");
+      if (methodBox) methodBox.style.display = isSignup ? "" : "none";
+      if (backBtn) backBtn.style.display = isSignup ? "none" : "";
 
       document.querySelectorAll(".auth-tab").forEach(function (t) {
         const active = t.getAttribute("data-auth-mode") === (isSignup ? "signup" : "signin");
@@ -3737,8 +3741,19 @@
       }
     }
 
-    const useSignupPhone = document.getElementById("signup-use-phone");
-    if (useSignupPhone) useSignupPhone.addEventListener("click", function () { openPhoneFlow("signup"); });
+    // Email / WhatsApp choice for passenger registration (shown in both forms)
+    document.querySelectorAll("[data-method]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const method = btn.getAttribute("data-method");
+        const inPhoneFlow = phoneForm && !phoneForm.classList.contains("is-hidden");
+        if (method === "whatsapp") {
+          if (!inPhoneFlow) openPhoneFlow("signup");
+        } else {
+          phoneStopCooldown();
+          showAuthForm("signup");
+        }
+      });
+    });
     const useSigninPhone = document.getElementById("signin-use-phone");
     if (useSigninPhone) useSigninPhone.addEventListener("click", function () { openPhoneFlow("signin"); });
 

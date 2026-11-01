@@ -3497,3 +3497,37 @@ body { background-color: #0B1030; }
   font-family: var(--font-mono);
   padding-left: 0.5em;
 }
+
+/* ---------- Verification method toggle (Email / WhatsApp) ---------- */
+.method-toggle { margin: 0 0 18px; }
+.method-toggle__label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--ink-800);
+}
+.method-toggle__options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.method-toggle__btn {
+  padding: 12px 10px;
+  border: 2px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background-color: var(--white);
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--ink-700);
+  transition: border-color var(--duration-base) var(--ease-standard),
+              background-color var(--duration-base) var(--ease-standard),
+              transform var(--duration-base) var(--ease-spring);
+}
+.method-toggle__btn:hover { border-color: var(--brand-400); transform: translateY(-1px); }
+.method-toggle__btn.is-active {
+  border-color: var(--brand-600);
+  background: linear-gradient(135deg, var(--brand-050), #FFF9F2);
+  color: var(--brand-700);
+  box-shadow: 0 6px 16px rgba(109, 95, 250, 0.18);
+}
