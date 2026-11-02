@@ -22,3 +22,9 @@ alter table public.profiles alter column email drop not null;
 --    The client now only self-assigns passenger/driver/operator, but the
 --    real guard must be in the database. Make sure your profiles INSERT/UPDATE
 --    policies (or a trigger) reject role = 'admin' unless the caller is an admin.
+
+-- 5. Live tracking: make sure Realtime is enabled for these tables so the
+--    passenger's map and trip status update without refreshing.
+--    (If a line errors with "already member of publication", that is fine.)
+alter publication supabase_realtime add table public.trip_locations;
+alter publication supabase_realtime add table public.trips;

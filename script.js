@@ -121,7 +121,7 @@
     role: null,
     currentView: "home",
     notifications: [],
-    channels: { notifications: null, tripLocations: null },
+    channels: { notifications: null, tripLocations: null, tripStatus: null },
     gpsWatchId: null,
     activeTrip: null,
     isSigningIn: false,
@@ -945,6 +945,9 @@
         return;
       }
 
+      if (AppState.currentView === "track-trip" && key !== "track-trip" && typeof disposeTracking === "function") {
+        disposeTracking();
+      }
       AppState.currentView = key;
       renderNavigation();
       window.scrollTo({ top: 0, behavior: "auto" });
@@ -1079,6 +1082,7 @@
             '</div>' +
           '</div>' +
         '</section>' +
+        '<section class="card card--live is-hidden" id="home-active-trip"></section>' +
         '<section class="card is-hidden" id="home-news-card">' +
           '<div class="card__header"><h3 class="card__title">📰 Service updates</h3></div>' +
           '<div class="card__body" id="home-news"></div>' +
@@ -1093,6 +1097,43 @@
           Router.go(el.getAttribute("data-home-view"));
         });
       });
+
+      // ---- Active trip banner: bus the passenger booked is on its way ----
+      (async function loadActiveTripBanner() {
+        const banner = document.getElementById("home-active-trip");
+        if (!banner || !supabase) return;
+        try {
+          const { data, error } = await supabase
+            .from("bookings")
+            .select("*, trips!inner(*, routes(origin, destination), vehicles(registration_number))")
+            .eq("passenger_id", AppState.authUser.id)
+            .in("status", ["reserved", "boarded"])
+            .in("trips.status", ["boarding", "in_transit"])
+            .order("created_at", { ascending: false })
+            .limit(1);
+          if (error) throw error;
+          if (!data || data.length === 0) return;
+          const b = data[0];
+          const t = b.trips || {};
+          const r = t.routes || {};
+          const veh = t.vehicles || {};
+          const boarding = t.status === "boarding";
+          banner.innerHTML =
+            '<div class="card__body live-banner">' +
+              '<div class="live-banner__pulse" aria-hidden="true"></div>' +
+              '<div class="live-banner__text">' +
+                '<p class="eyebrow">' + (boarding ? "Your bus is boarding" : "Your bus is on the way") + '</p>' +
+                '<p class="live-banner__route">' + escapeHtml(r.origin || "?") + ' → ' + escapeHtml(r.destination || "?") + '</p>' +
+                '<p class="live-banner__meta">' + escapeHtml(t.trip_code || "—") + ' · ' + escapeHtml(veh.registration_number || "—") +
+                  ' · Seat ' + escapeHtml(b.seat_number || "—") + '</p>' +
+              '</div>' +
+              '<button type="button" class="button button--primary" data-track-booking="' + escapeHtml(t.id || b.trip_id || "") + '">📍 Track bus</button>' +
+            '</div>';
+          banner.classList.remove("is-hidden");
+        } catch (err) {
+          console.warn("[TransitCare] Active trip banner skipped:", err && err.message);
+        }
+      })();
 
       const upcoming = document.getElementById("home-upcoming");
       try {
@@ -1166,28 +1207,53 @@
     }
   });
 
+  // A booking can be tracked while the passenger still holds the seat
+  // and the bus is actually on its way.
+  function isBookingTrackable(booking) {
+    const trip = (booking && booking.trips) || {};
+    return (booking.status === "reserved" || booking.status === "boarded") &&
+      (trip.status === "boarding" || trip.status === "in_transit");
+  }
+
+  function renderTrackBookingButton(booking, extraClass) {
+    if (!isBookingTrackable(booking)) return "";
+    return '<button type="button" class="button button--small button--primary ' + (extraClass || "") +
+      '" data-track-booking="' + escapeHtml(booking.trip_id || (booking.trips && booking.trips.id) || "") + '">' +
+      '📍 Track bus</button>';
+  }
+
   function renderBookingRow(booking) {
     const trip = booking.trips || {};
     const route = trip.routes || {};
     const vehicle = trip.vehicles || {};
+    const tripStatus = trip.status ? ' · Bus: ' + humanizeStatus(trip.status) : "";
     return (
       '<div class="list__item"><div class="list__main">' +
         '<p class="list__title">' + escapeHtml(route.origin || "?") + ' → ' + escapeHtml(route.destination || "?") + '</p>' +
         '<p class="list__meta">' + escapeHtml(trip.trip_code || "—") + ' · ' +
-          escapeHtml(vehicle.registration_number || "—") + ' · Seat ' + escapeHtml(booking.seat_number || "—") + '</p>' +
+          escapeHtml(vehicle.registration_number || "—") + ' · Seat ' + escapeHtml(booking.seat_number || "—") +
+          escapeHtml(tripStatus) + '</p>' +
       '</div>' +
-      '<span class="badge badge--' + escapeHtml(booking.status || "reserved") + '">' +
-        escapeHtml(humanizeStatus(booking.status)) + '</span></div>'
+      '<div class="list__actions">' +
+        renderTrackBookingButton(booking) +
+        '<span class="badge badge--' + escapeHtml(booking.status || "reserved") + '">' +
+          escapeHtml(humanizeStatus(booking.status)) + '</span>' +
+      '</div></div>'
     );
   }
 
   function renderNotificationRow(notification) {
+    const trackId = notification.type === "trip_started" && notification.related_entity
+      ? notification.related_entity : "";
     return (
-      '<div class="notification-item' + (notification.is_read ? "" : " notification-item--unread") + '" data-notification-id="' + escapeHtml(notification.id) + '">' +
+      '<div class="notification-item' + (notification.is_read ? "" : " notification-item--unread") +
+        (trackId ? " notification-item--link" : "") + '" data-notification-id="' + escapeHtml(notification.id) + '"' +
+        (trackId ? ' data-track-trip-id="' + escapeHtml(trackId) + '" role="button" tabindex="0"' : "") + '>' +
         '<span class="notification-item__icon" aria-hidden="true">🔔</span>' +
         '<div class="notification-item__body">' +
           '<p class="notification-item__title">' + escapeHtml(notification.title || "Notification") + '</p>' +
           '<p class="notification-item__message">' + escapeHtml(notification.message || "") + '</p>' +
+          (trackId ? '<p class="notification-item__cta">📍 Tap to track</p>' : "") +
           '<p class="notification-item__time">' + escapeHtml(formatRelativeTime(notification.created_at)) + '</p>' +
         '</div>' +
         (notification.is_read ? "" : '<span class="notification-dot" aria-label="Unread"></span>') +
@@ -1565,6 +1631,7 @@
             '<div id="qr-' + escapeHtml(ticket ? ticket.id : "") + '"></div>' +
             '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding.</p>' +
           '</div>' +
+          (isBookingTrackable(booking) ? '<div class="ticket-card__track">' + renderTrackBookingButton(booking, "button--block") + '</div>' : "") +
         '</div>' +
       '</article>'
     );
@@ -1593,11 +1660,15 @@
     render: async function (container, params) {
       const tripId = params.tripId;
       if (!tripId) {
-        renderEmpty(container, { icon: "🚌", title: "No trip selected", message: "Open tracking from a search result." });
+        renderEmpty(container, { icon: "🚌", title: "No trip selected", message: "Open a trip from My trips or Tickets and tap Track bus." });
         return;
       }
 
+      // Clean up any previous tracking session (map, marker, timers, live channels)
+      disposeTracking();
+
       container.innerHTML =
+        '<div><button type="button" class="button button--ghost button--small" id="track-back">← Back to my trips</button></div>' +
         '<section class="card">' +
           '<div class="card__header">' +
             '<h3 class="card__title" id="track-title">Loading trip…</h3>' +
@@ -1635,14 +1706,52 @@
           '<div><dt>Actual departure</dt><dd>' + escapeHtml(trip.actual_departure ? formatDateTime(trip.actual_departure) : "Not yet") + '</dd></div>' +
         '</dl>';
 
+        const backBtn = document.getElementById("track-back");
+        if (backBtn) backBtn.addEventListener("click", function () { Router.go("my-trips"); });
+
+        if (trip.status === "completed" || trip.status === "cancelled") {
+          const mapEl = document.getElementById("track-map");
+          if (mapEl) {
+            mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">' +
+              (trip.status === "completed" ? "✅" : "⚠️") + '</span>' +
+              (trip.status === "completed" ? "This trip has ended. Thanks for riding with Eko TransitCare." : "This trip was cancelled.") + '</div>';
+          }
+          return;
+        }
+
         await initTrackingMap(trip);
         subscribeToTripLocations(trip.id);
+        subscribeToTripStatus(trip.id);
+        trackFreshnessTimer = setInterval(refreshTrackFreshness, 15000);
       } catch (err) { renderError(container, err.message); }
     }
   });
 
   let trackMapInstance = null;
   let trackMarker = null;
+  let trackLastRecordedAt = null;
+  let trackFreshnessTimer = null;
+
+  // Tear down everything a tracking session creates. Safe to call repeatedly.
+  function disposeTracking() {
+    if (trackFreshnessTimer) { clearInterval(trackFreshnessTimer); trackFreshnessTimer = null; }
+    if (trackMapInstance) {
+      try { trackMapInstance.remove(); } catch (err) { /* already gone */ }
+    }
+    trackMapInstance = null;
+    trackMarker = null;
+    trackLastRecordedAt = null;
+    stopRealtimeChannel("tripLocations");
+    stopRealtimeChannel("tripStatus");
+  }
+
+  // Re-evaluates "Last updated …" / stale state without waiting for a new GPS point.
+  function refreshTrackFreshness() {
+    if (trackLastRecordedAt && trackMarker) {
+      const ll = trackMarker.getLatLng();
+      renderTrackOverlay(trackLastRecordedAt, ll.lat, ll.lng, true);
+    }
+  }
 
   async function initTrackingMap(trip) {
     const mapEl = document.getElementById("track-map");
@@ -1681,29 +1790,34 @@
     }
   }
 
+  function renderTrackOverlay(recordedAt, lat, lng, skipView) {
+    const mapEl = document.getElementById("track-map");
+    if (!mapEl) return;
+    const age = Date.now() - new Date(recordedAt).getTime();
+    const stale = age > TRANSITCARE_CONFIG.GPS_STALE_THRESHOLD_MS;
+    const overlayHtml = '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
+      '<span class="map-overlay__label">' + (stale ? "GPS signal may be unavailable" : "Live location") + '</span>' +
+      '<span class="map-overlay__value">Last updated ' + escapeHtml(formatRelativeTime(recordedAt)) + '</span></div>';
+    const overlay = mapEl.querySelector(".map-overlay");
+    if (overlay) overlay.outerHTML = overlayHtml;
+    else mapEl.insertAdjacentHTML("beforeend", overlayHtml);
+  }
+
   function updateTrackMarker(lat, lng, recordedAt) {
     if (!trackMapInstance || !window.L) return;
+    const latNum = Number(lat), lngNum = Number(lng);
+    if (!isFinite(latNum) || !isFinite(lngNum)) return;
+
     if (!trackMarker) {
-      trackMarker = window.L.marker([lat, lng]).addTo(trackMapInstance);
+      trackMarker = window.L.marker([latNum, lngNum]).addTo(trackMapInstance);
+      trackMapInstance.setView([latNum, lngNum], 15);
     } else {
-      trackMarker.setLatLng([lat, lng]);
+      trackMarker.setLatLng([latNum, lngNum]);
+      // Follow the bus, but keep the passenger's own zoom level.
+      trackMapInstance.panTo([latNum, lngNum]);
     }
-    trackMapInstance.setView([lat, lng], trackMapInstance.getZoom() || 14);
-
-    const mapEl = document.getElementById("track-map");
-    if (mapEl) {
-      let overlay = mapEl.querySelector(".map-overlay");
-      const age = Date.now() - new Date(recordedAt).getTime();
-      const stale = age > TRANSITCARE_CONFIG.GPS_STALE_THRESHOLD_MS;
-      const ageText = formatRelativeTime(recordedAt);
-
-      const overlayHtml = '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
-        '<span class="map-overlay__label">' + (stale ? "GPS signal may be unavailable" : "Live location") + '</span>' +
-        '<span class="map-overlay__value">Last updated ' + escapeHtml(ageText) + '</span></div>';
-
-      if (overlay) overlay.outerHTML = overlayHtml;
-      else mapEl.insertAdjacentHTML("beforeend", overlayHtml);
-    }
+    trackLastRecordedAt = recordedAt;
+    renderTrackOverlay(recordedAt, latNum, lngNum);
   }
 
   function subscribeToTripLocations(tripId) {
@@ -1717,6 +1831,38 @@
       }, function (payload) {
         const loc = payload.new;
         if (loc) updateTrackMarker(loc.latitude, loc.longitude, loc.recorded_at);
+      })
+      .subscribe();
+  }
+
+  // Updates the status badge live and tells the passenger when the trip ends.
+  function subscribeToTripStatus(tripId) {
+    if (!supabase) return;
+    stopRealtimeChannel("tripStatus");
+    AppState.channels.tripStatus = supabase
+      .channel("trip-status-" + tripId)
+      .on("postgres_changes", {
+        event: "UPDATE", schema: "public",
+        table: "trips", filter: "id=eq." + tripId
+      }, function (payload) {
+        const t = payload.new;
+        if (!t) return;
+        const statusEl = document.getElementById("track-status");
+        if (statusEl) {
+          statusEl.className = "badge badge--" + (t.status || "scheduled");
+          statusEl.textContent = humanizeStatus(t.status);
+        }
+        if (t.status === "completed" || t.status === "cancelled") {
+          Toast.info(t.status === "completed" ? "Trip completed" : "Trip cancelled",
+            t.status === "completed" ? "You have arrived. Thanks for riding with us." : "This trip was cancelled.");
+          disposeTracking();
+          const mapEl = document.getElementById("track-map");
+          if (mapEl) {
+            mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">' +
+              (t.status === "completed" ? "✅" : "⚠️") + '</span>' +
+              (t.status === "completed" ? "This trip has ended." : "This trip was cancelled.") + '</div>';
+          }
+        }
       })
       .subscribe();
   }
@@ -3928,7 +4074,31 @@
   /* =======================================================================
      26. GLOBAL UI WIRING
      ======================================================================= */
+  // One delegated listener so every screen's Track button / tappable
+  // notification works without per-render wiring.
+  function wireTrackingShortcuts() {
+    document.addEventListener("click", function (event) {
+      const btn = event.target.closest && event.target.closest("[data-track-booking]");
+      if (btn) {
+        const id = btn.getAttribute("data-track-booking");
+        if (id) Router.go("track-trip", { tripId: id });
+        return;
+      }
+      const note = event.target.closest && event.target.closest("[data-track-trip-id]");
+      if (note) {
+        const id = note.getAttribute("data-track-trip-id");
+        if (id) Router.go("track-trip", { tripId: id });
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const note = event.target.closest && event.target.closest("[data-track-trip-id]");
+      if (note) { event.preventDefault(); note.click(); }
+    });
+  }
+
   function wireGlobalUi() {
+    wireTrackingShortcuts();
     const toggle = document.getElementById("sidebar-toggle");
     if (toggle) toggle.addEventListener("click", toggleSidebar);
 
