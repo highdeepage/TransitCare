@@ -1,42 +1,5 @@
-# WhatsApp OTP for passengers — setup
+# WhatsApp OTP — deferred
 
-The app code is done. For codes to actually arrive you must switch on phone
-auth in Supabase (Dashboard → Authentication → Providers → Phone):
-
-1. Enable the **Phone** provider.
-2. Choose **Twilio** as the provider (the Supabase provider that supports the
-   WhatsApp channel) and fill in Account SID, Auth Token and a
-   WhatsApp-enabled sender (Messaging Service SID / WhatsApp number).
-3. In Twilio, register your WhatsApp sender with Meta and get an
-   authentication (OTP) message template approved. Meta needs a verified
-   business for production; Twilio's WhatsApp sandbox works for testing.
-4. Set the OTP length to 6 (default) and keep "Enable phone confirmations" on.
-5. Run `sql/001_fixes_and_phone_auth.sql`.
-
-How it works in the app
-- Sign up → "Sign up with your WhatsApp number instead" (passengers only):
-  name + number + terms → `signInWithOtp({ channel: "whatsapp", shouldCreateUser: true })`
-  → user types the code → `verifyOtp({ type: "sms" })` → profile is created
-  automatically as a passenger.
-- Sign in → "Sign in with a WhatsApp code instead": same flow with
-  `shouldCreateUser: false`, so unknown numbers get "create an account first".
-- Numbers like 0803… are converted to +234803…; other countries need +code.
-- Drivers and operators still register with email only.
-
-If WhatsApp isn't set up yet, users will see "WhatsApp codes are not
-available right now. Please use email instead."
-
-
-## Email confirmation emails not arriving
-Supabase's built-in email sender is only for testing: it is heavily rate-limited
-and (on newer projects) only delivers to your own team members' addresses.
-For real users set up custom SMTP:
-
-1. Verify a sending domain in Resend (Domains → Add domain, add the DNS records).
-   `onboarding@resend.dev` can only email your own Resend account address.
-2. Supabase → Authentication → Emails → SMTP Settings → enable custom SMTP:
-   host `smtp.resend.com`, port `465`, username `resend`, password = your Resend API key,
-   sender e.g. `no-reply@yourdomain.com`, sender name `Eko TransitCare`.
-3. Authentication → Sign In / Providers → Email: keep "Confirm email" ON.
-4. Authentication → URL Configuration: set Site URL to https://ekotransitcare.vercel.app
-   and add the same URL under Redirect URLs.
+WhatsApp verification is switched off on purpose (`WHATSAPP_OTP_ENABLED: false` in `script.js`).
+The screens show "Coming soon" and send nothing. When you are ready, see section 3 of
+`AUTH_SETUP.md`. This file can be deleted from the repository.

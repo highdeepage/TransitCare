@@ -24,6 +24,13 @@
     RESCHEDULE_CUTOFF_MINUTES: 15,
     SIGNIN_TIMEOUT_MS: 12000,
 
+    // Authentication options
+    EMAIL_OTP_LENGTH: 6,
+    EMAIL_OTP_EXPIRY_SECONDS: 600,   // must match Supabase → Authentication → Emails → OTP expiry
+    OTP_RESEND_SECONDS: 60,
+    GOOGLE_AUTH_ENABLED: true,       // also switch Google on in Supabase → Authentication → Providers
+    WHATSAPP_OTP_ENABLED: false,     // "Coming soon". Set true only after WhatsApp delivery is set up.
+
     DEFAULT_MAP_CENTER: { lat: 6.5244, lng: 3.3792 },
     DEFAULT_MAP_ZOOM: 12
   };
@@ -71,6 +78,7 @@
 
   const CDN = {
     QRCODE: "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js",
+    JSQR: "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
     LEAFLET_JS: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
     LEAFLET_CSS: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
   };
@@ -221,7 +229,8 @@
   }
 
   function generateTripCode() {
-    return "TC-" + Math.floor(100 + Math.random() * 900);
+    // 6 characters from the clock + randomness; the database also enforces uniqueness.
+    return "TC-" + (Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 4)).toUpperCase();
   }
 
   function generateTicketCode() {
@@ -634,18 +643,27 @@
       });
       if (error) throw error;
 
+      // An already-registered email comes back as a "user" with no identities and NO email is
+      // sent. Without this check the person would wait on the code screen for a code that never comes.
+      if (data && data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        const dup = new Error("An account with this email already exists. Please sign in, or use “Forgot password” if you cannot remember it.");
+        dup.code = "EMAIL_EXISTS";
+        throw dup;
+      }
+
       const needsVerification = data.session === null;
 
       if (!needsVerification && data.user && data.user.id) {
         try {
-          await supabase.from("profiles").insert({
+          // upsert + ignoreDuplicates: never a second profile for the same auth user
+          await supabase.from("profiles").upsert({
             id: data.user.id,
             full_name: payload.fullName,
             email: payload.email,
             phone: payload.phone || null,
             role: payload.role || "passenger",
             status: payload.role === "driver" ? "email_verified" : "active"
-          });
+          }, { onConflict: "id", ignoreDuplicates: true });
         } catch (err) { console.warn("[TransitCare] Profile insert skipped:", err); }
       }
 
@@ -692,6 +710,37 @@
       const { data, error } = await supabase.auth.verifyOtp({ phone: phone, token: token, type: "sms" });
       if (error) throw error;
       return data;
+    },
+
+    // 6-digit code sent by email after sign-up (Supabase "Confirm signup" template uses {{ .Token }})
+    async verifyEmailOtp(email, token) {
+      if (!supabase) throw new Error("Supabase is not configured.");
+      const { data, error } = await supabase.auth.verifyOtp({ email: email, token: token, type: "signup" });
+      if (error) throw error;
+      return data;
+    },
+
+    async signInWithGoogle() {
+      if (!supabase) throw new Error("Supabase is not configured.");
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: window.location.origin + window.location.pathname,
+          skipBrowserRedirect: true,
+          queryParams: { prompt: "select_account" }
+        }
+      });
+      if (error) throw error;
+      if (!data || !data.url) throw new Error("Google sign-in could not be started.");
+
+      // Check the provider is switched on first, so people never land on a raw error page.
+      try {
+        const probe = await fetch(data.url, { redirect: "manual" });
+        if (probe.type !== "opaqueredirect" && probe.status >= 400) {
+          const e = new Error("Google sign-in is not enabled."); e.code = "GOOGLE_DISABLED"; throw e;
+        }
+      } catch (e) { if (e && e.code === "GOOGLE_DISABLED") throw e; /* offline/CORS: just try */ }
+      window.location.assign(data.url);
     },
 
     async resendVerification(email) {
@@ -826,7 +875,9 @@
       { key: "operator-fleet",     label: "Vehicles",     icon: "🚌" },
       { key: "operator-drivers",   label: "Drivers",      icon: "👨‍✈️" },
       { key: "operator-trips",     label: "Trips",        icon: "🧭" },
+      { key: "operator-reports",   label: "Reports",      icon: "📈" },
       { group: "Account" },
+      { key: "operator-company",   label: "Company",      icon: "🏢" },
       { key: "notifications",      label: "Notifications", icon: "🔔", badgeKey: "unreadNotifications" },
       { key: "profile",            label: "Profile",       icon: "👤" }
     ],
@@ -856,7 +907,7 @@
   const BOTTOM_NAV = {
     passenger: ["home", "search", "my-trips", "tickets", "notifications"],
     driver: ["driver-dashboard", "make-bus-available", "active-trip", "scan-ticket", "profile"],
-    operator: ["operator-dashboard", "operator-fleet", "operator-drivers", "operator-trips", "profile"],
+    operator: ["operator-dashboard", "operator-fleet", "operator-drivers", "operator-trips", "operator-reports"],
     admin: ["admin-dashboard", "admin-users", "admin-trips", "admin-reports", "profile"]
   };
 
@@ -948,6 +999,7 @@
       if (AppState.currentView === "track-trip" && key !== "track-trip" && typeof disposeTracking === "function") {
         disposeTracking();
       }
+      if (key !== "scan-ticket" && typeof QrScanner !== "undefined") QrScanner.stop();
       AppState.currentView = key;
       renderNavigation();
       window.scrollTo({ top: 0, behavior: "auto" });
@@ -1515,12 +1567,21 @@
         }).select().single();
       if (bookingError) throw bookingError;
 
-      const { error: ticketError } = await supabase.from("tickets").insert({
-        booking_id: booking.id,
-        ticket_code: generateTicketCode(),
-        status: "valid"
-      });
-      if (ticketError) throw ticketError;
+      let ticketError = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await supabase.from("tickets").insert({
+          booking_id: booking.id,
+          ticket_code: generateTicketCode(),
+          status: "valid"
+        });
+        ticketError = res.error;
+        if (!ticketError || ticketError.code !== "23505") break;   // retry only on a duplicate code
+      }
+      if (ticketError) {
+        // Never leave a paid seat without a ticket: release it again.
+        try { await supabase.from("bookings").delete().eq("id", booking.id); } catch (e) { /* best effort */ }
+        throw ticketError;
+      }
 
       await Notifications.create({
         recipient_id: AppState.authUser.id,
@@ -1628,7 +1689,7 @@
             '<div class="ticket-card__detail"><dt>Fare</dt><dd>' + escapeHtml(formatCurrency(booking.fare)) + '</dd></div>' +
           '</dl>' +
           '<div class="ticket-card__qr">' +
-            '<div id="qr-' + escapeHtml(ticket ? ticket.id : "") + '"></div>' +
+            '<div id="qr-' + escapeHtml(ticket ? ticket.id : "none-" + booking.id) + '"></div>' +
             '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding.</p>' +
           '</div>' +
           (isBookingTrackable(booking) ? '<div class="ticket-card__track">' + renderTrackBookingButton(booking, "button--block") + '</div>' : "") +
@@ -1680,6 +1741,7 @@
             '</div>' +
           '</div>' +
           '<div class="card__footer" id="track-details"></div>' +
+          '<div class="card__footer"><button type="button" class="button button--secondary" id="share-trip-button">🔗 Share my trip with a friend</button></div>' +
         '</section>';
 
       try {
@@ -1708,6 +1770,14 @@
 
         const backBtn = document.getElementById("track-back");
         if (backBtn) backBtn.addEventListener("click", function () { Router.go("my-trips"); });
+
+        const shareBtn = document.getElementById("share-trip-button");
+        if (shareBtn) {
+          const canShare = (AppState.role === "passenger" || AppState.role === "driver") &&
+            trip.status !== "completed" && trip.status !== "cancelled";
+          if (!canShare) shareBtn.parentElement.remove();
+          else shareBtn.addEventListener("click", function () { openShareTripModal(trip); });
+        }
 
         if (trip.status === "completed" || trip.status === "cancelled") {
           const mapEl = document.getElementById("track-map");
@@ -2128,15 +2198,20 @@
 
         Loader.show("Creating trip…");
         try {
-          const { data, error } = await supabase.from("trips").insert({
-            trip_code: generateTripCode(),
-            driver_id: AppState.authUser.id,
-            vehicle_id: vehicleId,
-            route_id: routeId,
-            terminal_id: terminalId || null,
-            planned_departure: new Date(departureLocal).toISOString(),
-            status: "scheduled"
-          }).select().single();
+          let data = null, error = null;
+          for (let attempt = 0; attempt < 4; attempt++) {
+            const res = await supabase.from("trips").insert({
+              trip_code: generateTripCode(),
+              driver_id: AppState.authUser.id,
+              vehicle_id: vehicleId,
+              route_id: routeId,
+              terminal_id: terminalId || null,
+              planned_departure: new Date(departureLocal).toISOString(),
+              status: "scheduled"
+            }).select().single();
+            data = res.data; error = res.error;
+            if (!error || error.code !== "23505") break;   // retry only on a duplicate trip code
+          }
           if (error) throw error;
 
           await Data.logAudit("trip_created", "trip", data.id, { route_id: routeId });
@@ -2204,17 +2279,31 @@
 
     const actions = document.getElementById("trip-actions");
 
+    const refreshActive = function () { Router.go("active-trip"); };
     if (trip.status === "scheduled") {
-      actions.innerHTML = '<button type="button" class="button button--primary" id="start-trip-button">▶ Start trip</button>';
+      actions.innerHTML =
+        '<button type="button" class="button button--secondary" id="open-boarding-button">🚪 Open boarding</button>' +
+        '<button type="button" class="button button--primary" id="start-trip-button">▶ Start trip</button>' +
+        '<button type="button" class="button button--ghost" id="cancel-trip-button">Cancel trip</button>';
+      document.getElementById("open-boarding-button").addEventListener("click", function () { openBoarding(trip); });
       document.getElementById("start-trip-button").addEventListener("click", function () { startTrip(trip); });
-    } else if (trip.status === "boarding" || trip.status === "in_transit") {
-      actions.innerHTML = '<button type="button" class="button button--danger" id="end-trip-button">⏹ End trip</button>';
+      document.getElementById("cancel-trip-button").addEventListener("click", function () { openCancelTripModal(trip, refreshActive); });
+    } else if (trip.status === "boarding") {
+      actions.innerHTML =
+        '<button type="button" class="button button--secondary" id="scan-tickets-button">📷 Scan tickets</button>' +
+        '<button type="button" class="button button--primary" id="start-trip-button">▶ Start trip</button>' +
+        '<button type="button" class="button button--ghost" id="cancel-trip-button">Cancel trip</button>';
+      document.getElementById("scan-tickets-button").addEventListener("click", function () { Router.go("scan-ticket"); });
+      document.getElementById("start-trip-button").addEventListener("click", function () { startTrip(trip); });
+      document.getElementById("cancel-trip-button").addEventListener("click", function () { openCancelTripModal(trip, refreshActive); });
+    } else if (trip.status === "in_transit") {
+      actions.innerHTML =
+        '<button type="button" class="button button--secondary" id="scan-tickets-button">📷 Scan tickets</button>' +
+        '<button type="button" class="button button--danger" id="end-trip-button">⏹ End trip</button>';
+      document.getElementById("scan-tickets-button").addEventListener("click", function () { Router.go("scan-ticket"); });
       document.getElementById("end-trip-button").addEventListener("click", function () { endTrip(trip); });
-
-      if (trip.status === "in_transit") {
-        document.getElementById("gps-card").style.display = "";
-        startGpsWatch(trip);
-      }
+      document.getElementById("gps-card").style.display = "";
+      startGpsWatch(trip);
     }
   }
 
@@ -2229,18 +2318,21 @@
       await Data.logAudit("trip_started", "trip", trip.id, null);
 
       const { data: bookings } = await supabase.from("bookings").select("passenger_id")
-        .eq("trip_id", trip.id).eq("status", "reserved");
+        .eq("trip_id", trip.id).in("status", ["reserved", "boarded"]);
 
-      if (bookings && bookings.length) {
-        for (const b of bookings) {
-          await Notifications.create({
-            recipient_id: b.passenger_id,
-            title: "Trip started",
-            message: "Bus " + (trip.trip_code || "") + " has departed. Track it live.",
-            type: "trip_started",
-            related_entity: trip.id
-          });
-        }
+      const rows = (bookings || []).filter(function (b) { return b.passenger_id; }).map(function (b) {
+        return {
+          recipient_id: b.passenger_id,
+          title: "Trip started",
+          message: "Bus " + (trip.trip_code || "") + " has departed. Track it live.",
+          type: "trip_started",
+          related_entity: trip.id,
+          is_read: false
+        };
+      });
+      if (rows.length) {
+        const ins = await supabase.from("notifications").insert(rows);
+        if (ins.error) console.warn("[TransitCare] Trip-start notifications failed:", ins.error.message);
       }
 
       Toast.success("Trip started", "GPS tracking will begin shortly.");
@@ -2296,74 +2388,6 @@
     }
   });
 
-  Router.register("scan-ticket", {
-    title: "Scan ticket",
-    subtitle: "Validate a passenger's QR ticket against the database.",
-    render: async function (container) {
-      container.innerHTML =
-        '<section class="card"><div class="card__header"><h3 class="card__title">Ticket code</h3></div>' +
-        '<div class="card__body">' +
-          '<div class="field"><label for="ticket-code-input">Enter or scan the ticket code</label>' +
-            '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" /></div>' +
-          '<button type="button" class="button button--primary" id="validate-ticket-button">Validate ticket</button>' +
-        '</div></section><div id="scan-result"></div>';
-
-      const input = document.getElementById("ticket-code-input");
-      const button = document.getElementById("validate-ticket-button");
-      const resultEl = document.getElementById("scan-result");
-
-      async function validate() {
-        const code = input.value.trim().toUpperCase();
-        if (!code) { Toast.warning("Enter a ticket code"); return; }
-
-        renderLoading(resultEl, "Validating…");
-        try {
-          const { data: ticket, error } = await supabase.from("tickets")
-            .select("*, bookings(*, trips(*, routes(origin, destination)))")
-            .eq("ticket_code", code).maybeSingle();
-          if (error) throw error;
-
-          if (!ticket) {
-            resultEl.innerHTML = scannerResult("invalid", "✕", "Invalid ticket", "No ticket with this code exists.");
-            return;
-          }
-
-          const booking = ticket.bookings || {};
-
-          if (ticket.status === "used") {
-            resultEl.innerHTML = scannerResult("used", "⚠", "Ticket already used", "Scanned on " + formatDateTime(ticket.used_at) + ".");
-            return;
-          }
-
-          if (ticket.status === "cancelled") {
-            resultEl.innerHTML = scannerResult("invalid", "✕", "Ticket cancelled", "This ticket has been cancelled.");
-            return;
-          }
-
-          const { error: updateError } = await supabase.from("tickets")
-            .update({ status: "used", used_at: nowIso() }).eq("id", ticket.id);
-          if (updateError) throw updateError;
-
-          await supabase.from("bookings").update({ status: "boarded" }).eq("id", booking.id);
-          await Data.logAudit("ticket_scanned", "ticket", ticket.id, { booking_id: booking.id });
-
-          resultEl.innerHTML = scannerResult("valid", "✓", "Valid ticket",
-            "Seat " + escapeHtml(booking.seat_number || "—") + " · " +
-            escapeHtml(booking.trips && booking.trips.routes ? booking.trips.routes.origin + " → " + booking.trips.routes.destination : ""));
-          input.value = "";
-        } catch (err) {
-          Toast.error("Validation failed", err.message);
-          resultEl.innerHTML = "";
-        }
-      }
-
-      button.addEventListener("click", validate);
-      input.addEventListener("keydown", function (event) {
-        if (event.key === "Enter") { event.preventDefault(); validate(); }
-      });
-    }
-  });
-
   function scannerResult(type, icon, title, message) {
     return '<div class="scanner-result scanner-result--' + type + '">' +
       '<span class="scanner-result__icon" aria-hidden="true">' + icon + '</span>' +
@@ -2375,124 +2399,6 @@
   /* =======================================================================
      16. OPERATOR VIEWS
      ======================================================================= */
-
-  Router.register("operator-dashboard", {
-    title: "Operator dashboard",
-    subtitle: "Your fleet at a glance.",
-    render: async function (container) {
-      const operatorId = AppState.profile ? AppState.profile.operator_id : null;
-      container.innerHTML = '<section class="stat-grid" id="operator-stats"></section>';
-
-      try {
-        const vehicles = await supabase.from("vehicles").select("id").eq("operator_id", operatorId);
-        const vehicleIds = (vehicles.data || []).map(function (v) { return v.id; });
-        const [drivers, trips] = await Promise.all([
-          supabase.from("profiles").select("id").eq("operator_id", operatorId).eq("role", "driver"),
-          vehicleIds.length
-            ? supabase.from("trips").select("id").in("vehicle_id", vehicleIds)
-            : Promise.resolve({ data: [] })
-        ]);
-
-        document.getElementById("operator-stats").innerHTML =
-          statCard("🚌", (vehicles.data || []).length, "Vehicles", "") +
-          statCard("👨‍✈️", (drivers.data || []).length, "Drivers", "info") +
-          statCard("🧭", (trips.data || []).length, "Trips", "success");
-      } catch (err) { renderError(container, err.message); }
-    }
-  });
-
-  Router.register("operator-fleet", {
-    title: "Fleet",
-    subtitle: "Vehicles registered under your operator account.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="fleet-list"></div></div>';
-      const list = document.getElementById("fleet-list");
-      renderLoading(list, "Loading fleet…");
-
-      try {
-        const { data, error } = await supabase.from("vehicles").select("*")
-          .eq("operator_id", AppState.profile.operator_id)
-          .order("registration_number", { ascending: true });
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "🚌", title: "No vehicles", message: "No vehicles are registered under your operator." });
-          return;
-        }
-
-        list.innerHTML = '<div class="list">' + data.map(function (v) {
-          return '<div class="list__item"><div class="list__main">' +
-            '<p class="list__title">' + escapeHtml(v.registration_number) + '</p>' +
-            '<p class="list__meta">' + escapeHtml(v.vehicle_type || "") + ' · ' + escapeHtml(v.capacity) + ' seats</p></div>' +
-            '<span class="badge badge--' + escapeHtml(v.status || "active") + '">' +
-              escapeHtml(humanizeStatus(v.status || "active")) + '</span></div>';
-        }).join("") + '</div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
-  Router.register("operator-drivers", {
-    title: "Drivers",
-    subtitle: "Drivers registered under your operator.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="op-drivers-list"></div></div>';
-      const list = document.getElementById("op-drivers-list");
-      renderLoading(list, "Loading drivers…");
-
-      try {
-        const { data, error } = await supabase.from("profiles").select("*")
-          .eq("operator_id", AppState.profile.operator_id).eq("role", "driver");
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "👨‍✈️", title: "No drivers", message: "No drivers are associated with your operator." });
-          return;
-        }
-
-        list.innerHTML = '<div class="list">' + data.map(function (d) {
-          return '<div class="list__item"><div class="list__main">' +
-            '<p class="list__title">' + escapeHtml(d.full_name || "—") + '</p>' +
-            '<p class="list__meta">' + escapeHtml(d.email || "") + '</p></div>' +
-            '<span class="badge badge--' + escapeHtml(d.status || "pending") + '">' +
-              escapeHtml(humanizeStatus(d.status || "pending")) + '</span></div>';
-        }).join("") + '</div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
-  Router.register("operator-trips", {
-    title: "Trips",
-    subtitle: "Trips operated by your fleet.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="op-trips-list"></div></div>';
-      const list = document.getElementById("op-trips-list");
-      renderLoading(list, "Loading trips…");
-
-      try {
-        const opVehicles = await supabase.from("vehicles").select("id")
-          .eq("operator_id", AppState.profile ? AppState.profile.operator_id : null);
-        if (opVehicles.error) throw opVehicles.error;
-        const opVehicleIds = (opVehicles.data || []).map(function (v) { return v.id; });
-
-        let data = [];
-        if (opVehicleIds.length) {
-          const res = await supabase.from("trips")
-            .select("*, routes(origin, destination), vehicles(registration_number)")
-            .in("vehicle_id", opVehicleIds)
-            .order("planned_departure", { ascending: false }).limit(50);
-          if (res.error) throw res.error;
-          data = res.data || [];
-        }
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "🧭", title: "No trips", message: "No trips recorded yet." });
-          return;
-        }
-        list.innerHTML = '<div class="list">' + data.map(renderDriverTripRow).join("") + '</div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
 
   /* =======================================================================
      17. ADMIN VIEWS
@@ -2553,36 +2459,6 @@
     }
   });
 
-  Router.register("admin-users", {
-    title: "Users",
-    subtitle: "All registered accounts.",
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="users-list"></div></div>';
-      const list = document.getElementById("users-list");
-      renderLoading(list, "Loading users…");
-
-      try {
-        const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "👥", title: "No users", message: "No accounts registered yet." });
-          return;
-        }
-
-        list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-          '<thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>' +
-          data.map(function (u) {
-            return '<tr><td>' + escapeHtml(u.full_name || "—") + '</td>' +
-              '<td>' + escapeHtml(u.email || "—") + '</td>' +
-              '<td><span class="badge">' + escapeHtml(humanizeStatus(u.role || "—")) + '</span></td>' +
-              '<td><span class="badge badge--' + escapeHtml(u.status || "active") + '">' +
-                escapeHtml(humanizeStatus(u.status || "active")) + '</span></td></tr>';
-          }).join("") + '</tbody></table></div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
-
   Router.register("admin-drivers", {
     title: "Driver approval",
     subtitle: "Approve drivers and assign vehicles.",
@@ -2632,6 +2508,7 @@
               (d.status !== "rejected"
                 ? '<button type="button" class="button button--small button--danger" data-reject="' + escapeHtml(d.id) + '">Reject</button>'
                 : "") +
+              '<button type="button" class="button button--small button--ghost" data-delete-driver="' + escapeHtml(d.id) + '">Delete</button>' +
             '</div></div>';
         }).join("") + '</div>';
 
@@ -2640,6 +2517,12 @@
         });
         list.querySelectorAll("[data-reject]").forEach(function (btn) {
           btn.addEventListener("click", function () { updateDriverStatus(btn.getAttribute("data-reject"), "rejected"); });
+        });
+        list.querySelectorAll("[data-delete-driver]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const driver = drivers.find(function (x) { return x.id === btn.getAttribute("data-delete-driver"); });
+            if (driver) openDeleteUserModal(driver, function () { Router.go("admin-drivers"); });
+          });
         });
         list.querySelectorAll("[data-assign]").forEach(function (btn) {
           btn.addEventListener("click", function () {
@@ -2744,35 +2627,6 @@
     } catch (err) { Toast.error("Unable to update driver", err.message); }
     finally { Loader.hide(); }
   }
-
-  Router.register("admin-operators", {
-    title: "Operators",
-    subtitle: "Transport companies on the platform.",
-    headerActions: '<button type="button" class="button button--primary button--small" id="add-operator">+ Add operator</button>',
-    render: async function (container) {
-      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="operators-list"></div></div>';
-      const list = document.getElementById("operators-list");
-      renderLoading(list, "Loading operators…");
-
-      const addBtn = document.getElementById("add-operator");
-      if (addBtn) addBtn.addEventListener("click", openAddOperatorModal);
-
-      try {
-        const data = await Data.getOperators();
-        if (!data || data.length === 0) {
-          renderEmpty(list, { icon: "🏢", title: "No operators", message: "Add your first transport operator." });
-          return;
-        }
-        list.innerHTML = '<div class="list">' + data.map(function (o) {
-          return '<div class="list__item"><div class="list__main">' +
-            '<p class="list__title">' + escapeHtml(o.name) + '</p>' +
-            '<p class="list__meta">' + escapeHtml(o.contact_name || "") + ' · ' + escapeHtml(o.phone || "") + '</p></div>' +
-            '<span class="badge badge--' + escapeHtml(o.status || "active") + '">' +
-              escapeHtml(humanizeStatus(o.status || "active")) + '</span></div>';
-        }).join("") + '</div>';
-      } catch (err) { renderError(list, err.message); }
-    }
-  });
 
   function openAddOperatorModal() {
     Modal.open({
@@ -3497,43 +3351,6 @@
     else openSidebar();
   }
 
-  function showVerificationNotice(email, role) {
-    const message = document.getElementById("auth-message");
-    if (!message) return;
-
-    const roleLabel = role === "driver" ? "Driver" : role === "operator" ? "Operator" : "Passenger";
-
-    message.className = "alert alert--success";
-    message.innerHTML =
-      "<strong>Almost there — check your email.</strong>" +
-      "<span>We sent a verification link to <code>" + escapeHtml(email) + "</code>. " +
-      "Click the link to activate your " + escapeHtml(roleLabel.toLowerCase()) + " account.</span>" +
-      '<div class="mt-3" style="display:flex;gap:8px;flex-wrap:wrap;">' +
-        '<button type="button" class="button button--ghost button--small" id="resend-verification">Resend verification email</button>' +
-        '<button type="button" class="button button--ghost button--small" id="go-to-signin">Back to sign in</button>' +
-      '</div>';
-
-    const resend = document.getElementById("resend-verification");
-    if (resend) {
-      resend.addEventListener("click", async function () {
-        resend.disabled = true;
-        resend.innerHTML = '<span class="button__spinner"></span> Sending…';
-        try {
-          await Auth.resendVerification(email);
-          Toast.success("Verification email resent", "Check your inbox in a moment.");
-        } catch (err) { Toast.error("Unable to resend", err.message || "Please try again later."); }
-        finally { resend.disabled = false; resend.textContent = "Resend verification email"; }
-      });
-    }
-
-    const back = document.getElementById("go-to-signin");
-    if (back) {
-      back.addEventListener("click", function () {
-        const signinTab = document.querySelector('[data-auth-mode="signin"]');
-        if (signinTab) signinTab.click();
-      });
-    }
-  }
 
 
   /* =======================================================================
@@ -3546,9 +3363,10 @@
     const forgotForm = document.getElementById("forgot-form");
     const resetForm = document.getElementById("reset-form");
     const phoneForm = document.getElementById("phone-form");
+    const otpForm = document.getElementById("otp-form");
 
     function showAuthForm(mode) {
-      [signinForm, signupForm, forgotForm, resetForm, phoneForm].forEach(function (f) {
+      [signinForm, signupForm, forgotForm, resetForm, phoneForm, otpForm].forEach(function (f) {
         if (f) f.classList.add("is-hidden");
       });
       document.querySelectorAll(".auth-tab").forEach(function (t) {
@@ -3570,9 +3388,21 @@
         resetForm.classList.remove("is-hidden");
       } else if (mode === "phone" && phoneForm) {
         phoneForm.classList.remove("is-hidden");
+      } else if (mode === "otp" && otpForm) {
+        otpForm.classList.remove("is-hidden");
+        const tab = document.getElementById("tab-signup");
+        if (tab) tab.classList.add("is-active");
       }
 
       setFormMessage("auth-message", null, "");
+    }
+    AppState.showAuthForm = showAuthForm;
+    bindEmailOtpForm();
+
+    function showWhatsAppSoon() {
+      showAuthForm(signupForm && !signupForm.classList.contains("is-hidden") ? "signup" : "signin");
+      setFormMessage("auth-message", "info",
+        "WhatsApp verification is coming soon. For now, please continue with email or Google.");
     }
 
     document.querySelectorAll("[data-auth-mode]").forEach(function (tab) {
@@ -3640,28 +3470,11 @@
           }
 
           const msg = (err && err.message) ? err.message : "";
-          if (/email not confirmed|email not verified|confirm/i.test(msg)) {
-            const container = document.getElementById("auth-message");
-            container.className = "alert alert--warning";
-            container.innerHTML =
-              "<strong>Your email is not yet verified.</strong>" +
-              "<span>Please check your inbox for the verification link we sent to <code>" +
-                escapeHtml(email) + "</code>.</span>";
-
-            const resendBtn = document.createElement("button");
-            resendBtn.type = "button";
-            resendBtn.className = "button button--ghost button--small mt-3";
-            resendBtn.textContent = "Resend verification email";
-            resendBtn.addEventListener("click", async function () {
-              resendBtn.disabled = true;
-              resendBtn.textContent = "Sending…";
-              try {
-                await Auth.resendVerification(email);
-                Toast.success("Verification email resent");
-              } catch (e2) { Toast.error("Unable to resend", e2.message); }
-              finally { resendBtn.disabled = false; resendBtn.textContent = "Resend verification email"; }
-            });
-            container.appendChild(resendBtn);
+          if (/email not confirmed|email not verified/i.test(msg)) {
+            // Send a fresh 6-digit code and take the user straight to the code screen.
+            try { await Auth.resendVerification(email); } catch (e2) { /* the code screen has its own Resend */ }
+            openEmailOtp(email);
+            setFormMessage("auth-message", "warning", "Your email is not verified yet. Enter the 6-digit code we just sent.");
           } else {
             setFormMessage("auth-message", "danger", msg || "Unable to sign in.");
           }
@@ -3768,6 +3581,7 @@
     }
 
     function openPhoneFlow(mode) {
+      if (!TRANSITCARE_CONFIG.WHATSAPP_OTP_ENABLED) { showWhatsAppSoon(); return; }
       phoneState.mode = mode;
       phoneState.phone = null;
       phoneStopCooldown();
@@ -3887,21 +3701,33 @@
       }
     }
 
-    // Email / WhatsApp choice for passenger registration (shown in both forms)
+    // Email / Google / WhatsApp choice for passenger registration
     document.querySelectorAll("[data-method]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         const method = btn.getAttribute("data-method");
         const inPhoneFlow = phoneForm && !phoneForm.classList.contains("is-hidden");
-        if (method === "whatsapp") {
-          if (!inPhoneFlow) openPhoneFlow("signup");
+        if (method === "google") {
+          startGoogleSignIn(btn);
+        } else if (method === "whatsapp") {
+          if (!TRANSITCARE_CONFIG.WHATSAPP_OTP_ENABLED) showWhatsAppSoon();
+          else if (!inPhoneFlow) openPhoneFlow("signup");
         } else {
           phoneStopCooldown();
           showAuthForm("signup");
         }
       });
     });
+    document.querySelectorAll("[data-google-signin]").forEach(function (btn) {
+      btn.addEventListener("click", function () { startGoogleSignIn(btn); });
+    });
     const useSigninPhone = document.getElementById("signin-use-phone");
-    if (useSigninPhone) useSigninPhone.addEventListener("click", function () { openPhoneFlow("signin"); });
+    if (useSigninPhone) {
+      if (TRANSITCARE_CONFIG.WHATSAPP_OTP_ENABLED) useSigninPhone.textContent = "💬 Sign in with a WhatsApp code instead";
+      useSigninPhone.addEventListener("click", function () {
+        if (!TRANSITCARE_CONFIG.WHATSAPP_OTP_ENABLED) { showWhatsAppSoon(); return; }
+        openPhoneFlow("signin");
+      });
+    }
 
     if (phoneForm) {
       phoneForm.addEventListener("submit", function (event) {
@@ -4009,6 +3835,16 @@
     AppState.isSigningIn = true;
 
     try {
+      // Only accept Google accounts whose email Google has verified.
+      if (hasUnverifiedGoogleIdentity(session.user)) {
+        AppState.isSigningIn = false;
+        try { await supabase.auth.signOut(); } catch (e) { /* ignore */ }
+        resetState();
+        showAuthScreen();
+        setFormMessage("auth-message", "danger", "Your Google email address is not verified, so we could not sign you in.");
+        return;
+      }
+      stopEmailOtpTimer();
       AppState.authUser = session.user;
 
       // 2. Fetch or restore profile
@@ -4024,16 +3860,20 @@
         // Only self-service roles may be created from client-side metadata.
         const allowedRoles = ["passenger", "driver", "operator"];
         const isPhoneUser = !session.user.email && !!session.user.phone;
-        const safeRole = isPhoneUser ? "passenger" : (allowedRoles.indexOf(meta.role) !== -1 ? meta.role : "passenger");
+        const provider = (session.user.app_metadata && session.user.app_metadata.provider) || "email";
+        // Phone and Google sign-ups are passengers only; driver/operator need the email form.
+        const safeRole = (isPhoneUser || provider === "google") ? "passenger"
+          : (allowedRoles.indexOf(meta.role) !== -1 ? meta.role : "passenger");
         try {
-          await supabase.from("profiles").insert({
+          // upsert + ignoreDuplicates = "insert unless it already exists": never a second profile
+          await supabase.from("profiles").upsert({
             id: session.user.id,
-            full_name: meta.full_name || session.user.email || session.user.phone,
+            full_name: meta.full_name || meta.name || session.user.email || session.user.phone,
             email: session.user.email || null,
             phone: meta.phone || session.user.phone || null,
             role: safeRole,
             status: safeRole === "driver" ? "email_verified" : "active"
-          });
+          }, { onConflict: "id", ignoreDuplicates: true });
           profile = await Profile.fetch(session.user.id);
         } catch (err) {
           console.warn("[TransitCare] Profile auto-creation skipped:", err);
@@ -4042,6 +3882,12 @@
 
       AppState.profile = profile;
       AppState.role = Profile.resolveRole(profile, session.user);
+
+      // Operators always get a company record so every operator screen works.
+      if (AppState.role === "operator" && profile && !profile.operator_id) {
+        try { await ensureOperatorLink(); }
+        catch (err) { console.warn("[TransitCare] Operator company setup skipped:", err.message); }
+      }
 
       // 3. Render authenticated UI
       updateHeaderUser();
@@ -4193,8 +4039,22 @@
 
   async function bootstrap() {
     initSupabase();
+
+    // A friend's shared link (?track=CODE) opens the public tracker only.
+    const sharedCode = new URLSearchParams(window.location.search).get("track");
+    if (sharedCode !== null) {
+      PublicTrack.start(sharedCode);
+      return;
+    }
+
     bindAuthForms();
     wireGlobalUi();
+
+    const redirectError = readAuthRedirectError();
+    if (redirectError) {
+      showAuthScreen();
+      setFormMessage("auth-message", "warning", redirectError);
+    }
 
     if (!supabase) {
       showAuthScreen();
@@ -4244,6 +4104,1475 @@
       }
     });
   }
+
+  /* =======================================================================
+     27. DATABASE FUNCTION CALLS (RPC)
+     ======================================================================= */
+  function friendlyRpcError(error) {
+    const msg = (error && error.message) || "Something went wrong.";
+    let out;
+    if ((error && error.code === "PGRST202") || /could not find the function|schema cache/i.test(msg)) {
+      out = new Error("This feature needs the latest database update. Run sql/002_features.sql in Supabase (SQL Editor), then try again.");
+      out.code = "RPC_MISSING";
+    } else {
+      out = new Error(msg);
+      out.code = error && error.code;
+    }
+    return out;
+  }
+
+  async function callRpc(name, args) {
+    if (!supabase) throw new Error("Supabase is not configured.");
+    const result = await supabase.rpc(name, args || {});
+    if (result.error) throw friendlyRpcError(result.error);
+    return result.data;
+  }
+
+  function moneyOrDash(value) {
+    return formatCurrency(Number(value) || 0);
+  }
+
+  function csvEscape(value) {
+    const s = value === null || value === undefined ? "" : String(value);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  function downloadCsv(filename, rows) {
+    const text = rows.map(function (row) { return row.map(csvEscape).join(","); }).join("\n");
+    const blob = new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+
+  /* =======================================================================
+     28. QR SCANNER (driver)
+     Uses the phone's built-in QR detector when available and falls back
+     to the jsQR library, so it works on iPhones and older Androids too.
+     ======================================================================= */
+  const QrScanner = (function () {
+    let stream = null, rafId = null, video = null, active = false, detector = null;
+    let canvas = null, ctx = null, lastTick = 0, onResult = null;
+
+    async function ensureJsQr() {
+      if (window.jsQR) return;
+      await loadExternalScript(CDN.JSQR);
+      if (!window.jsQR) throw new Error("The QR reader could not be loaded. Type the ticket number instead.");
+    }
+
+    function stop() {
+      active = false;
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+      if (video) { try { video.pause(); video.srcObject = null; } catch (e) { /* gone */ } }
+    }
+
+    function loop() {
+      if (!active) return;
+      rafId = requestAnimationFrame(async function (ts) {
+        if (!active) return;
+        if (ts - lastTick < 140 || !video || video.readyState < 2) { loop(); return; }
+        lastTick = ts;
+        let text = null;
+        try {
+          if (detector) {
+            const found = await detector.detect(video);
+            if (found && found.length) text = found[0].rawValue;
+          } else {
+            const w = video.videoWidth, h = video.videoHeight;
+            if (w && h) {
+              canvas.width = w; canvas.height = h;
+              ctx.drawImage(video, 0, 0, w, h);
+              const img = ctx.getImageData(0, 0, w, h);
+              const res = window.jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+              if (res && res.data) text = res.data;
+            }
+          }
+        } catch (e) { /* keep scanning */ }
+        if (text) {
+          const cb = onResult;
+          stop();
+          if (cb) cb(text);
+          return;
+        }
+        loop();
+      });
+    }
+
+    async function start(videoEl, callback) {
+      stop();
+      onResult = callback;
+      video = videoEl;
+      if (!window.isSecureContext) throw new Error("The camera only works on a secure (https) page.");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("This browser cannot open the camera. Type the ticket number instead.");
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+      } catch (err) {
+        if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+          throw new Error("Camera permission was denied. Allow the camera in your browser settings, or type the ticket number.");
+        }
+        if (err && err.name === "NotFoundError") throw new Error("No camera was found on this device.");
+        throw new Error("The camera could not be started. Type the ticket number instead.");
+      }
+      video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.muted = true;
+      try { await video.play(); } catch (e) { /* autoplay quirks */ }
+
+      detector = null;
+      if ("BarcodeDetector" in window) {
+        try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { detector = null; }
+      }
+      if (!detector) await ensureJsQr();
+      canvas = document.createElement("canvas");
+      ctx = canvas.getContext("2d", { willReadFrequently: true });
+      active = true;
+      loop();
+    }
+
+    // Reads a QR code from a photo (works even when live camera is blocked).
+    async function decodeFile(file) {
+      await ensureJsQr();
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      const cx = c.getContext("2d", { willReadFrequently: true });
+      cx.drawImage(bmp, 0, 0, c.width, c.height);
+      const img = cx.getImageData(0, 0, c.width, c.height);
+      const res = window.jsQR(img.data, c.width, c.height);
+      return res && res.data ? res.data : null;
+    }
+
+    return { start: start, stop: stop, decodeFile: decodeFile, isRunning: function () { return active; } };
+  })();
+
+  // Pulls a ticket number out of whatever the QR contained.
+  function extractTicketCode(raw) {
+    const text = String(raw || "").trim().toUpperCase();
+    const m = text.match(/TKT-[A-Z0-9]+-[A-Z0-9]+/);
+    if (m) return m[0];
+    return text.split(/\s+/)[0] || "";
+  }
+
+  Router.register("scan-ticket", {
+    title: "Scan ticket",
+    subtitle: "Scan the passenger's QR code or type the ticket number.",
+    render: async function (container) {
+      QrScanner.stop();
+      container.innerHTML =
+        '<section class="card"><div class="card__header"><h3 class="card__title">Check a ticket</h3></div>' +
+        '<div class="card__body">' +
+          '<div class="scan-actions">' +
+            '<button type="button" class="button button--primary" id="scan-start-button">📷 Scan QR code</button>' +
+            '<button type="button" class="button button--ghost is-hidden" id="scan-stop-button">Stop camera</button>' +
+            '<label class="button button--ghost" for="scan-photo-input">🖼️ Scan from photo</label>' +
+            '<input type="file" id="scan-photo-input" accept="image/*" capture="environment" class="is-hidden" />' +
+          '</div>' +
+          '<div class="scan-viewport is-hidden" id="scan-viewport">' +
+            '<video id="scan-video" muted playsinline></video><div class="scan-viewport__frame" aria-hidden="true"></div>' +
+          '</div>' +
+          '<p class="field__hint" id="scan-hint" role="status"></p>' +
+          '<p class="scan-divider">Or type the ticket number</p>' +
+          '<div class="field"><label for="ticket-code-input">Ticket number</label>' +
+            '<input type="text" id="ticket-code-input" placeholder="TKT-XXXX-XXXX" autocomplete="off" autocapitalize="characters" /></div>' +
+          '<button type="button" class="button button--secondary" id="validate-ticket-button">Check ticket</button>' +
+        '</div></section><div id="scan-result" aria-live="polite"></div>';
+
+      const startBtn = document.getElementById("scan-start-button");
+      const stopBtn = document.getElementById("scan-stop-button");
+      const viewport = document.getElementById("scan-viewport");
+      const videoEl = document.getElementById("scan-video");
+      const hint = document.getElementById("scan-hint");
+      const input = document.getElementById("ticket-code-input");
+      const checkBtn = document.getElementById("validate-ticket-button");
+      const photoInput = document.getElementById("scan-photo-input");
+      const resultEl = document.getElementById("scan-result");
+      let busy = false;
+
+      function cameraUi(on) {
+        viewport.classList.toggle("is-hidden", !on);
+        stopBtn.classList.toggle("is-hidden", !on);
+        startBtn.classList.toggle("is-hidden", on);
+      }
+
+      function stopCamera() { QrScanner.stop(); cameraUi(false); }
+
+      async function startCamera() {
+        resultEl.innerHTML = "";
+        hint.textContent = "Starting camera…";
+        try {
+          cameraUi(true);
+          await QrScanner.start(videoEl, handleCode);
+          hint.textContent = "Point the camera at the passenger's QR code.";
+        } catch (err) {
+          cameraUi(false);
+          hint.textContent = "";
+          Toast.warning("Camera unavailable", err.message);
+        }
+      }
+
+      function resultCard(type, icon, title, message, extra) {
+        return scannerResult(type, icon, title, message) + (extra || "");
+      }
+
+      async function check(code, confirm) {
+        if (busy) return;
+        busy = true;
+        renderLoading(resultEl, confirm ? "Confirming boarding…" : "Checking ticket…");
+        try {
+          const res = await callRpc("tc_validate_ticket", { p_code: code, p_confirm: !!confirm });
+          if (navigator.vibrate) navigator.vibrate(res.result === "valid" || res.result === "boarded" ? 60 : [80, 60, 80]);
+          showResult(res, code);
+        } catch (err) {
+          resultEl.innerHTML = scannerResult("invalid", "✕", "Could not check ticket", err.message);
+        } finally { busy = false; }
+      }
+
+      function showResult(res, code) {
+        const again = '<button type="button" class="button button--ghost" id="scan-next-button">Scan next ticket</button>';
+        const details =
+          '<dl class="detail-list scan-details">' +
+            '<div><dt>Passenger</dt><dd>' + escapeHtml(res.passenger || "—") + '</dd></div>' +
+            '<div><dt>Seat</dt><dd>' + escapeHtml(res.seat || "—") + '</dd></div>' +
+            '<div><dt>Route</dt><dd>' + escapeHtml(res.route || "—") + '</dd></div>' +
+            '<div><dt>Trip</dt><dd>' + escapeHtml(res.trip_code || "—") + '</dd></div>' +
+          '</dl>';
+
+        if (res.result === "valid") {
+          resultEl.innerHTML = '<div class="scanner-result scanner-result--valid">' +
+            '<span class="scanner-result__icon" aria-hidden="true">✓</span>' +
+            '<p class="scanner-result__title">Valid ticket</p>' + details +
+            '<div class="scan-result-actions">' +
+              '<button type="button" class="button button--primary" id="scan-confirm-button">Confirm boarding</button>' +
+              again + '</div></div>';
+          document.getElementById("scan-confirm-button").addEventListener("click", function () { check(code, true); });
+        } else if (res.result === "boarded") {
+          resultEl.innerHTML = '<div class="scanner-result scanner-result--valid">' +
+            '<span class="scanner-result__icon" aria-hidden="true">✓</span>' +
+            '<p class="scanner-result__title">Boarded</p>' + details +
+            '<div class="scan-result-actions">' + again + '</div></div>';
+        } else if (res.result === "used") {
+          resultEl.innerHTML = '<div class="scanner-result scanner-result--used">' +
+            '<span class="scanner-result__icon" aria-hidden="true">⚠</span>' +
+            '<p class="scanner-result__title">Ticket already used</p>' +
+            '<p class="scanner-result__message">' + escapeHtml(res.used_at ? "Scanned on " + formatDateTime(res.used_at) + "." : (res.message || "")) + '</p>' +
+            '<div class="scan-result-actions">' + again + '</div></div>';
+        } else {
+          const titles = { wrong_trip: "Not for this trip", cancelled: "Ticket cancelled", trip_ended: "Trip has ended", invalid: "Invalid ticket" };
+          resultEl.innerHTML = '<div class="scanner-result scanner-result--invalid">' +
+            '<span class="scanner-result__icon" aria-hidden="true">✕</span>' +
+            '<p class="scanner-result__title">' + escapeHtml(titles[res.result] || "Invalid ticket") + '</p>' +
+            '<p class="scanner-result__message">' + escapeHtml(res.message || "") + '</p>' +
+            '<div class="scan-result-actions">' + again + '</div></div>';
+        }
+        const next = document.getElementById("scan-next-button");
+        if (next) next.addEventListener("click", function () {
+          resultEl.innerHTML = ""; input.value = "";
+          if (QrScanner.isRunning()) return;
+          if (!viewport.classList.contains("is-hidden")) startCamera();
+        });
+      }
+
+      function handleCode(raw) {
+        const code = extractTicketCode(raw);
+        if (!code) { Toast.warning("Unreadable code", "That QR code is not a TransitCare ticket."); return; }
+        input.value = code;
+        hint.textContent = "";
+        check(code, false);
+      }
+
+      startBtn.addEventListener("click", startCamera);
+      stopBtn.addEventListener("click", stopCamera);
+      checkBtn.addEventListener("click", function () {
+        const code = extractTicketCode(input.value);
+        if (!code) { Toast.warning("Enter a ticket number"); return; }
+        stopCamera();
+        check(code, false);
+      });
+      input.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { event.preventDefault(); checkBtn.click(); }
+      });
+      photoInput.addEventListener("change", async function () {
+        const file = photoInput.files && photoInput.files[0];
+        photoInput.value = "";
+        if (!file) return;
+        hint.textContent = "Reading photo…";
+        try {
+          const text = await QrScanner.decodeFile(file);
+          hint.textContent = "";
+          if (!text) { Toast.warning("No QR code found", "Try a clearer photo, or type the ticket number."); return; }
+          stopCamera();
+          handleCode(text);
+        } catch (err) {
+          hint.textContent = "";
+          Toast.error("Could not read photo", err.message);
+        }
+      });
+    }
+  });
+
+
+  /* =======================================================================
+     29. DRIVER: BOARDING + CANCEL TRIP
+     ======================================================================= */
+  async function openBoarding(trip) {
+    Loader.show("Opening boarding…");
+    try {
+      const { error } = await supabase.from("trips").update({ status: "boarding" }).eq("id", trip.id);
+      if (error) throw error;
+      await Data.logAudit("boarding_opened", "trip", trip.id, null);
+
+      const { data: bookings } = await supabase.from("bookings").select("passenger_id")
+        .eq("trip_id", trip.id).eq("status", "reserved");
+      const rows = (bookings || []).filter(function (b) { return b.passenger_id; }).map(function (b) {
+        return {
+          recipient_id: b.passenger_id,
+          title: "Boarding now",
+          message: "Bus " + (trip.trip_code || "") + " is now boarding. Show your ticket QR code to the driver.",
+          type: "boarding_open", related_entity: trip.id, is_read: false
+        };
+      });
+      if (rows.length) {
+        const ins = await supabase.from("notifications").insert(rows);
+        if (ins.error) console.warn("[TransitCare] Boarding notifications failed:", ins.error.message);
+      }
+      Toast.success("Boarding is open", "Scan passengers' tickets as they get on.");
+      Router.go("active-trip");
+    } catch (err) { Toast.error("Unable to open boarding", err.message); }
+    finally { Loader.hide(); }
+  }
+
+  // Shared by drivers (their trip) and operators (their fleet's trips).
+  function openCancelTripModal(trip, onDone) {
+    Modal.open({
+      title: "Cancel trip " + (trip.trip_code || ""),
+      body:
+        '<p class="text-muted mb-4">Passengers who booked this trip will be notified and their tickets cancelled. This cannot be undone.</p>' +
+        '<div class="field"><label for="cancel-reason">Reason (optional)</label>' +
+        '<input type="text" id="cancel-reason" maxlength="120" placeholder="e.g. Vehicle breakdown" /></div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Keep trip</button>' +
+        '<button type="button" class="button button--danger" data-modal-action="confirm">Cancel trip</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const reasonEl = document.getElementById("cancel-reason");
+        const reason = reasonEl ? reasonEl.value.trim() : "";
+        Loader.show("Cancelling trip…");
+        try {
+          const res = await callRpc("tc_cancel_trip", { p_trip_id: trip.id, p_reason: reason || null });
+          Modal.close();
+          Toast.success("Trip cancelled", (res && res.passengers_notified ? res.passengers_notified + " passenger(s) notified." : "No passengers had booked."));
+          if (typeof onDone === "function") onDone();
+        } catch (err) { Toast.error("Unable to cancel trip", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+
+  /* =======================================================================
+     30. TRIP SHARING (passenger → friend)
+     ======================================================================= */
+  function buildShareUrl(code) {
+    return window.location.origin + window.location.pathname + "?track=" + encodeURIComponent(code);
+  }
+
+  async function openShareTripModal(trip) {
+    Loader.show("Creating your link…");
+    let code;
+    try {
+      code = await callRpc("tc_create_trip_share", { p_trip_id: trip.id });
+    } catch (err) {
+      Toast.error("Unable to share trip", err.message);
+      return;
+    } finally { Loader.hide(); }
+
+    const route = trip.routes ? (trip.routes.origin + " → " + trip.routes.destination) : "my bus";
+    const url = buildShareUrl(code);
+    const text = "Follow my bus (" + route + ") live on Eko TransitCare: " + url;
+    const canNativeShare = typeof navigator.share === "function";
+
+    Modal.open({
+      title: "Share your trip",
+      body:
+        '<p class="text-muted mb-4">Anyone with this link can watch your bus on a map, without signing in. ' +
+        'They cannot see your name, seat or ticket. The link stops working when the trip ends or after 24 hours.</p>' +
+        '<div class="field"><label for="share-link-input">Tracking link</label>' +
+        '<input type="text" id="share-link-input" class="share-link" readonly value="' + escapeHtml(url) + '" /></div>' +
+        '<div class="share-actions">' +
+          '<button type="button" class="button button--primary button--small" id="share-copy-button">Copy link</button>' +
+          '<a class="button button--secondary button--small" id="share-whatsapp-link" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=' + encodeURIComponent(text) + '">Send on WhatsApp</a>' +
+          (canNativeShare ? '<button type="button" class="button button--secondary button--small" id="share-native-button">More…</button>' : "") +
+        '</div>',
+      footer:
+        '<button type="button" class="button button--danger" data-modal-action="stop">Stop sharing</button>' +
+        '<button type="button" class="button button--ghost" data-modal-action="close">Done</button>',
+      onAction: async function (action) {
+        if (action === "close") { Modal.close(); return; }
+        Loader.show("Stopping…");
+        try {
+          await callRpc("tc_revoke_trip_share", { p_trip_id: trip.id });
+          Modal.close();
+          Toast.success("Sharing stopped", "The old link no longer works.");
+        } catch (err) { Toast.error("Unable to stop sharing", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+
+    const copyBtn = document.getElementById("share-copy-button");
+    if (copyBtn) copyBtn.addEventListener("click", async function () {
+      const input = document.getElementById("share-link-input");
+      try {
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(url);
+        else { input.focus(); input.select(); document.execCommand("copy"); }
+        Toast.success("Link copied");
+      } catch (e) { if (input) { input.focus(); input.select(); } Toast.info("Press Ctrl+C to copy the selected link"); }
+    });
+    const nativeBtn = document.getElementById("share-native-button");
+    if (nativeBtn) nativeBtn.addEventListener("click", function () {
+      navigator.share({ title: "Follow my bus", text: "Follow my bus (" + route + ") live:", url: url }).catch(function () { /* cancelled */ });
+    });
+  }
+
+
+  /* =======================================================================
+     31. PUBLIC TRACKER (friend opens ?track=CODE — no login)
+     ======================================================================= */
+  const PublicTrack = (function () {
+    let map = null, marker = null, timer = null, code = null, stopped = false, hasData = false;
+    const STATUS_TEXT = {
+      scheduled: "Not departed yet", boarding: "Boarding", in_transit: "On the way",
+      completed: "Arrived", cancelled: "Cancelled"
+    };
+
+    function el(id) { return document.getElementById(id); }
+    function setNote(text) { const n = el("public-track-note"); if (n) n.textContent = text || ""; }
+
+    function unavailable(message) {
+      stopPolling();
+      setText("public-track-title", "Link unavailable");
+      setText("public-track-sub", "");
+      setNote(message);
+      const mapEl = el("public-track-map");
+      if (mapEl) mapEl.style.display = "none";
+      const details = el("public-track-details");
+      if (details) details.innerHTML = "";
+      const badge = el("public-track-status");
+      if (badge) { badge.className = "badge badge--cancelled"; badge.textContent = "Unavailable"; }
+    }
+
+    function stopPolling() {
+      stopped = true;
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    async function ensureMap() {
+      if (map) return true;
+      const mapEl = el("public-track-map");
+      if (!mapEl) return false;
+      try {
+        await loadStylesheet(CDN.LEAFLET_CSS);
+        await loadExternalScript(CDN.LEAFLET_JS);
+        if (!window.L) throw new Error("Map library unavailable.");
+        mapEl.innerHTML = "";
+        const c = TRANSITCARE_CONFIG.DEFAULT_MAP_CENTER;
+        map = window.L.map(mapEl).setView([c.lat, c.lng], TRANSITCARE_CONFIG.DEFAULT_MAP_ZOOM);
+        window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "© OpenStreetMap contributors", maxZoom: 19
+        }).addTo(map);
+        return true;
+      } catch (err) {
+        mapEl.innerHTML = '<div class="map-placeholder"><span class="map-placeholder__icon">🗺️</span>Map unavailable right now.</div>';
+        return false;
+      }
+    }
+
+    function overlay(label, value, stale) {
+      const mapEl = el("public-track-map");
+      if (!mapEl) return;
+      const html = '<div class="map-overlay' + (stale ? " map-overlay--stale" : "") + '">' +
+        '<span class="map-overlay__label">' + escapeHtml(label) + '</span>' +
+        '<span class="map-overlay__value">' + escapeHtml(value) + '</span></div>';
+      const old = mapEl.querySelector(".map-overlay");
+      if (old) old.outerHTML = html; else mapEl.insertAdjacentHTML("beforeend", html);
+    }
+
+    async function render(info) {
+      hasData = true;
+      setText("public-track-title", (info.origin || "?") + " → " + (info.destination || "?"));
+      setText("public-track-sub",
+        "Trip " + (info.trip_code || "—") + (info.vehicle ? " · " + info.vehicle : "") +
+        (info.driver_first_name ? " · Driver " + info.driver_first_name : ""));
+      const badge = el("public-track-status");
+      if (badge) { badge.className = "badge badge--" + (info.status || "scheduled"); badge.textContent = STATUS_TEXT[info.status] || humanizeStatus(info.status); }
+
+      const rows = [["Planned departure", formatDateTime(info.planned_departure)]];
+      if (info.actual_departure) rows.push(["Departed", formatDateTime(info.actual_departure)]);
+      if (info.actual_arrival) rows.push(["Arrived", formatDateTime(info.actual_arrival)]);
+      rows.push(["Link valid until", formatDateTime(info.expires_at)]);
+      el("public-track-details").innerHTML = rows.map(function (r) {
+        return '<div><dt>' + escapeHtml(r[0]) + '</dt><dd>' + escapeHtml(r[1]) + '</dd></div>';
+      }).join("");
+
+      const ended = info.status === "completed" || info.status === "cancelled";
+      const mapOk = await ensureMap();
+
+      if (info.location && mapOk && window.L) {
+        const lat = Number(info.location.lat), lng = Number(info.location.lng);
+        if (isFinite(lat) && isFinite(lng)) {
+          if (!marker) { marker = window.L.marker([lat, lng]).addTo(map); map.setView([lat, lng], 15); }
+          else { marker.setLatLng([lat, lng]); map.panTo([lat, lng]); }
+          const stale = Date.now() - new Date(info.location.recorded_at).getTime() > TRANSITCARE_CONFIG.GPS_STALE_THRESHOLD_MS;
+          overlay(stale ? "Location may be out of date" : "Live location", "Last updated " + formatRelativeTime(info.location.recorded_at), stale);
+        }
+      } else if (mapOk) {
+        overlay("Waiting for location", info.status === "in_transit" || info.status === "boarding"
+          ? "The bus has not shared its position yet." : "Location appears once the trip starts.", false);
+      }
+
+      if (info.status === "completed") setNote("This trip has arrived. Thanks for following along.");
+      else if (info.status === "cancelled") setNote("This trip was cancelled.");
+      else if (info.status === "in_transit") setNote("The bus is on its way.");
+      else if (info.status === "boarding") setNote("Passengers are boarding.");
+      else setNote("The bus has not left yet.");
+
+      if (ended) stopPolling();
+    }
+
+    async function refresh() {
+      if (stopped) return;
+      try {
+        const info = await callRpc("tc_get_trip_share", { p_code: code });
+        if (!info) { unavailable("This link has expired or the sender stopped sharing."); return; }
+        await render(info);
+      } catch (err) {
+        if (err && err.code === "RPC_MISSING") { unavailable("Trip sharing is not set up yet."); return; }
+        if (hasData) setNote("Reconnecting…");
+        else unavailable("We could not load this trip. Check your connection and try again.");
+      }
+    }
+
+    function start(shareCode) {
+      document.documentElement.classList.add("is-public-track");
+      const meta = document.createElement("meta");
+      meta.name = "robots"; meta.content = "noindex,nofollow";
+      document.head.appendChild(meta);
+      const root = el("public-track");
+      if (root) root.classList.remove("is-hidden");
+      document.body.style.overflow = "";
+
+      if (!/^[a-f0-9]{64}$/i.test(shareCode || "")) { unavailable("This tracking link is not valid."); return; }
+      if (!supabase) { unavailable("Tracking is not available right now."); return; }
+      code = shareCode;
+      refresh();
+      timer = setInterval(function () { if (!document.hidden) refresh(); }, 8000);
+      document.addEventListener("visibilitychange", function () { if (!document.hidden && !stopped) refresh(); });
+    }
+
+    return { start: start };
+  })();
+
+
+  /* =======================================================================
+     32. EMAIL VERIFICATION BY 6-DIGIT CODE
+     ======================================================================= */
+  const EmailOtp = { email: null, expiresAt: 0, resendAt: 0, timer: null, wrong: 0, lockedUntil: 0 };
+
+  function stopEmailOtpTimer() {
+    if (EmailOtp.timer) { clearInterval(EmailOtp.timer); EmailOtp.timer = null; }
+  }
+
+  function formatCountdown(ms) {
+    const total = Math.max(0, Math.ceil(ms / 1000));
+    return String(Math.floor(total / 60)).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0");
+  }
+
+  function otpTick() {
+    const now = Date.now();
+    const timerEl = document.getElementById("otp-timer");
+    const submit = document.getElementById("otp-submit");
+    const resend = document.getElementById("otp-resend");
+    const expired = now >= EmailOtp.expiresAt;
+    const locked = now < EmailOtp.lockedUntil;
+
+    if (timerEl) {
+      if (expired) timerEl.textContent = "This code has expired. Tap Resend code to get a new one.";
+      else if (locked) timerEl.textContent = "Too many wrong attempts. Try again in " + formatCountdown(EmailOtp.lockedUntil - now) + ".";
+      else timerEl.textContent = "Code expires in " + formatCountdown(EmailOtp.expiresAt - now);
+    }
+    if (submit && !submit.dataset.busy) submit.disabled = expired || locked;
+    if (resend && !resend.dataset.busy) {
+      const left = Math.ceil((EmailOtp.resendAt - now) / 1000);
+      if (left > 0) { resend.disabled = true; resend.textContent = "Resend code in " + left + "s"; }
+      else { resend.disabled = false; resend.textContent = "Resend code"; }
+    }
+  }
+
+  function startOtpClocks() {
+    EmailOtp.expiresAt = Date.now() + TRANSITCARE_CONFIG.EMAIL_OTP_EXPIRY_SECONDS * 1000;
+    EmailOtp.resendAt = Date.now() + TRANSITCARE_CONFIG.OTP_RESEND_SECONDS * 1000;
+    EmailOtp.wrong = 0;
+    EmailOtp.lockedUntil = 0;
+    stopEmailOtpTimer();
+    otpTick();
+    EmailOtp.timer = setInterval(otpTick, 1000);
+  }
+
+  function openEmailOtp(email) {
+    EmailOtp.email = email;
+    if (typeof AppState.showAuthForm === "function") AppState.showAuthForm("otp");
+    const subtitle = document.getElementById("otp-subtitle");
+    if (subtitle) subtitle.innerHTML = "We sent a 6-digit code to <strong>" + escapeHtml(email) + "</strong>. Enter it below to activate your account.";
+    const input = document.getElementById("otp-code");
+    if (input) { input.value = ""; setTimeout(function () { input.focus(); }, 50); }
+    const form = document.getElementById("otp-form");
+    if (form) clearFormErrors(form);
+    startOtpClocks();
+  }
+
+  // Kept under its old name: called after sign-up.
+  function showVerificationNotice(email) { openEmailOtp(email); }
+
+  function bindEmailOtpForm() {
+    const form = document.getElementById("otp-form");
+    if (!form || form.dataset.bound) return;
+    form.dataset.bound = "true";
+    const input = document.getElementById("otp-code");
+    const submit = document.getElementById("otp-submit");
+    const resend = document.getElementById("otp-resend");
+
+    input.addEventListener("input", function () {
+      input.value = input.value.replace(/\D/g, "").slice(0, 6);
+      if (input.value.length === 6 && !submit.disabled) form.requestSubmit ? form.requestSubmit() : submit.click();
+    });
+
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      clearFormErrors(form);
+      setFormMessage("auth-message", null, "");
+      if (Date.now() >= EmailOtp.expiresAt) { setFieldError("otp-code", "This code has expired. Request a new one."); return; }
+      if (Date.now() < EmailOtp.lockedUntil) return;
+      const token = input.value.replace(/\D/g, "");
+      if (token.length !== 6) { setFieldError("otp-code", "Enter the 6-digit code from your email."); return; }
+
+      submit.dataset.busy = "1"; submit.disabled = true;
+      submit.innerHTML = '<span class="button__spinner"></span> Verifying…';
+      try {
+        await Auth.verifyEmailOtp(EmailOtp.email, token);
+        stopEmailOtpTimer();
+        setFormMessage("auth-message", "success", "Email verified. Signing you in…");
+      } catch (err) {
+        const msg = (err && err.message) || "";
+        EmailOtp.wrong += 1;
+        // Supabase answers "Token has expired or is invalid" for BOTH a wrong and an expired
+        // code, so only say "expired" when our own countdown has really run out.
+        if (/rate|too many|security purposes/i.test(msg)) setFieldError("otp-code", "Too many attempts. Please wait a moment and try again.");
+        else if (Date.now() >= EmailOtp.expiresAt) setFieldError("otp-code", "This code has expired. Tap Resend code.");
+        else setFieldError("otp-code", "That code is incorrect, or it has just expired. Check the latest email, or tap Resend code.");
+        if (EmailOtp.wrong >= 5) { EmailOtp.lockedUntil = Date.now() + 30000; EmailOtp.wrong = 0; }
+        input.value = ""; input.focus();
+      } finally {
+        delete submit.dataset.busy;
+        submit.textContent = "Verify and continue";
+        otpTick();
+      }
+    });
+
+    resend.addEventListener("click", async function () {
+      resend.dataset.busy = "1"; resend.disabled = true;
+      resend.textContent = "Sending…";
+      try {
+        await Auth.resendVerification(EmailOtp.email);
+        Toast.success("New code sent", "Check your inbox (and spam folder).");
+        startOtpClocks();
+      } catch (err) {
+        const msg = (err && err.message) || "";
+        Toast.error("Unable to resend", /rate|too many|security purposes/i.test(msg) ? "Please wait a minute before asking for another code." : (msg || "Please try again later."));
+      } finally { delete resend.dataset.busy; otpTick(); }
+    });
+
+    document.getElementById("otp-change").addEventListener("click", function () {
+      stopEmailOtpTimer();
+      clearFormErrors(form);
+      if (typeof AppState.showAuthForm === "function") AppState.showAuthForm("signup");
+    });
+  }
+
+
+  /* =======================================================================
+     33. GOOGLE SIGN-IN
+     ======================================================================= */
+  async function startGoogleSignIn(button) {
+    if (!TRANSITCARE_CONFIG.GOOGLE_AUTH_ENABLED) {
+      setFormMessage("auth-message", "info", "Google sign-in is not available yet. Please use email.");
+      return;
+    }
+    const original = button ? button.innerHTML : "";
+    if (button) { button.disabled = true; button.innerHTML = '<span class="button__spinner"></span> Opening Google…'; }
+    setFormMessage("auth-message", null, "");
+    try {
+      await Auth.signInWithGoogle();
+      // The browser is now leaving for Google; keep the button disabled.
+    } catch (err) {
+      if (button) { button.disabled = false; button.innerHTML = original; }
+      setFormMessage("auth-message", "danger", err.code === "GOOGLE_DISABLED"
+        ? "Google sign-in is not switched on yet. Please use email for now."
+        : (err.message || "Google sign-in could not be started."));
+    }
+  }
+
+  // After Google (or any redirect login) sends the browser back with an error.
+  function readAuthRedirectError() {
+    const params = new URLSearchParams(
+      (window.location.hash || "").replace(/^#/, "") + "&" + (window.location.search || "").replace(/^\?/, ""));
+    const error = params.get("error"), errorCode = params.get("error_code"), description = params.get("error_description");
+    if (!error && !errorCode) return null;
+    try { window.history.replaceState(null, "", window.location.pathname); } catch (e) { /* ignore */ }
+    if (error === "access_denied" || /cancel|denied/i.test(description || "")) {
+      return "Google sign-in was cancelled. You can try again or continue with email.";
+    }
+    return (description ? description.replace(/\+/g, " ") : "") || "Sign-in failed. Please try again.";
+  }
+
+  // Only trust a Google identity whose email Google itself has verified.
+  function hasUnverifiedGoogleIdentity(user) {
+    const identities = (user && user.identities) || [];
+    return identities.some(function (i) {
+      // Strict: a Google identity counts only when Google says the email is verified.
+      return i.provider === "google" && !(i.identity_data && i.identity_data.email_verified === true);
+    });
+  }
+
+
+  /* =======================================================================
+     34. ADMIN: DELETE USER ACCOUNTS
+     ======================================================================= */
+  function openDeleteUserModal(user, onDone) {
+    const role = user.role || "user";
+    const consequences = {
+      passenger: "Their tickets and seats on upcoming trips are removed. Past trips stay in the operator's records without their name.",
+      driver: "Upcoming trips are cancelled and booked passengers are notified. Past trips are kept without a driver name.",
+      operator: "Only this login is removed. The company record, vehicles and trips are kept."
+    };
+    const label = user.full_name || user.email || user.phone || "this account";
+
+    Modal.open({
+      title: "Delete " + role + " account",
+      body:
+        '<div class="delete-warning">This permanently deletes <strong>' + escapeHtml(label) + '</strong> and their sign-in. It cannot be undone.</div>' +
+        '<p class="text-muted mb-4">' + escapeHtml(consequences[role] || "Their sign-in and personal records are removed.") + '</p>' +
+        '<div class="field"><label for="delete-confirm-input">Type <strong>DELETE</strong> to confirm</label>' +
+        '<input type="text" id="delete-confirm-input" autocomplete="off" autocapitalize="characters" /></div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--danger" data-modal-action="delete" id="delete-user-confirm" disabled>Delete account</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const typed = document.getElementById("delete-confirm-input");
+        if (!typed || typed.value.trim().toUpperCase() !== "DELETE") return;
+        Loader.show("Deleting account…");
+        try {
+          await callRpc("tc_admin_delete_user", { p_user_id: user.id });
+          Modal.close();
+          Toast.success("Account deleted", label + " was removed.");
+          if (typeof onDone === "function") onDone();
+        } catch (err) { Toast.error("Unable to delete account", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+
+    const typed = document.getElementById("delete-confirm-input");
+    const confirmBtn = document.getElementById("delete-user-confirm");
+    if (typed && confirmBtn) {
+      typed.addEventListener("input", function () {
+        confirmBtn.disabled = typed.value.trim().toUpperCase() !== "DELETE";
+      });
+    }
+  }
+
+  Router.register("admin-users", {
+    title: "Users",
+    subtitle: "All registered accounts. Administrators can delete passenger, driver and operator accounts.",
+    render: async function (container) {
+      container.innerHTML =
+        '<div class="toolbar">' +
+          '<div class="field"><label for="users-search">Search</label>' +
+            '<input type="search" id="users-search" placeholder="Name, email or phone" autocomplete="off" /></div>' +
+          '<div class="field"><label for="users-role-filter">Role</label>' +
+            '<select id="users-role-filter"><option value="">All roles</option><option value="passenger">Passengers</option>' +
+            '<option value="driver">Drivers</option><option value="operator">Operators</option><option value="admin">Admins</option></select></div>' +
+        '</div>' +
+        '<div class="card"><div class="card__body card__body--flush" id="users-list"></div></div>';
+      const list = document.getElementById("users-list");
+      renderLoading(list, "Loading users…");
+
+      let users = [];
+      try {
+        const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
+        if (error) throw error;
+        users = data || [];
+      } catch (err) { renderError(list, err.message); return; }
+
+      const me = AppState.authUser ? AppState.authUser.id : null;
+
+      function draw() {
+        const q = document.getElementById("users-search").value.trim().toLowerCase();
+        const role = document.getElementById("users-role-filter").value;
+        const rows = users.filter(function (u) {
+          if (role && u.role !== role) return false;
+          if (!q) return true;
+          return [u.full_name, u.email, u.phone].some(function (v) { return String(v || "").toLowerCase().indexOf(q) !== -1; });
+        });
+        if (!rows.length) {
+          renderEmpty(list, { icon: "👥", title: "No users found", message: users.length ? "Try a different search or filter." : "No accounts registered yet." });
+          return;
+        }
+        list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
+          '<thead><tr><th>Name</th><th>Email / phone</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>' +
+          rows.map(function (u) {
+            const canDelete = u.role !== "admin" && u.id !== me;
+            return '<tr><td>' + escapeHtml(u.full_name || "—") + '</td>' +
+              '<td>' + escapeHtml(u.email || u.phone || "—") + '</td>' +
+              '<td><span class="badge">' + escapeHtml(humanizeStatus(u.role || "—")) + '</span></td>' +
+              '<td><span class="badge badge--' + escapeHtml(u.status || "active") + '">' + escapeHtml(humanizeStatus(u.status || "active")) + '</span></td>' +
+              '<td>' + (canDelete
+                ? '<button type="button" class="button button--small button--danger" data-delete-user="' + escapeHtml(u.id) + '">Delete</button>'
+                : '<span class="text-muted text-small">' + (u.id === me ? "You" : "Protected") + '</span>') + '</td></tr>';
+          }).join("") + '</tbody></table></div>';
+        list.querySelectorAll("[data-delete-user]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const user = users.find(function (x) { return x.id === btn.getAttribute("data-delete-user"); });
+            if (user) openDeleteUserModal(user, function () { Router.go("admin-users"); });
+          });
+        });
+      }
+
+      document.getElementById("users-search").addEventListener("input", draw);
+      document.getElementById("users-role-filter").addEventListener("change", draw);
+      draw();
+    }
+  });
+
+  // Admin: link operator logins to operator companies.
+  Router.register("admin-operators", {
+    title: "Operators",
+    subtitle: "Transport companies on the platform and the accounts that manage them.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="add-operator">+ Add operator</button>',
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="operators-list"></div></div>';
+      const list = document.getElementById("operators-list");
+      renderLoading(list, "Loading operators…");
+
+      const addBtn = document.getElementById("add-operator");
+      if (addBtn) addBtn.addEventListener("click", openAddOperatorModal);
+
+      try {
+        const [data, accountsRes] = await Promise.all([
+          Data.getOperators(),
+          supabase.from("profiles").select("id, full_name, email, operator_id").eq("role", "operator")
+        ]);
+        const accounts = (accountsRes && accountsRes.data) || [];
+        if (!data || data.length === 0) {
+          renderEmpty(list, { icon: "🏢", title: "No operators", message: "Add your first transport operator." });
+          return;
+        }
+        list.innerHTML = '<div class="list">' + data.map(function (o) {
+          const linked = accounts.filter(function (a) { return a.operator_id === o.id; });
+          const who = linked.length
+            ? linked.map(function (a) { return escapeHtml(a.full_name || a.email || "Account"); }).join(", ")
+            : "No login linked";
+          return '<div class="list__item"><div class="list__main">' +
+            '<p class="list__title">' + escapeHtml(o.name) + '</p>' +
+            '<p class="list__meta">' + escapeHtml(o.contact_name || "") + (o.phone ? ' · ' + escapeHtml(o.phone) : "") + ' · ' + who + '</p></div>' +
+            '<div class="list__actions">' +
+              '<button type="button" class="button button--small button--secondary" data-link-operator="' + escapeHtml(o.id) + '">Link account</button>' +
+              '<span class="badge badge--' + escapeHtml(o.status || "active") + '">' + escapeHtml(humanizeStatus(o.status || "active")) + '</span>' +
+            '</div></div>';
+        }).join("") + '</div>';
+
+        list.querySelectorAll("[data-link-operator]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const op = data.find(function (x) { return String(x.id) === btn.getAttribute("data-link-operator"); });
+            if (op) openLinkOperatorModal(op, accounts);
+          });
+        });
+      } catch (err) { renderError(list, err.message); }
+    }
+  });
+
+  function openLinkOperatorModal(operator, accounts) {
+    if (!accounts.length) { Toast.info("No operator accounts yet", "An operator must register first (Create account → Operator)."); return; }
+    const options = accounts.map(function (a) {
+      const taken = a.operator_id && String(a.operator_id) !== String(operator.id);
+      return '<option value="' + escapeHtml(a.id) + '"' + (String(a.operator_id) === String(operator.id) ? " selected" : "") + '>' +
+        escapeHtml((a.full_name || "Operator") + " · " + (a.email || "no email") + (taken ? " (linked to another company)" : "")) + '</option>';
+    }).join("");
+    Modal.open({
+      title: "Link account to " + operator.name,
+      body: '<p class="text-muted mb-4">The chosen operator login will manage this company\'s vehicles, drivers and trips.</p>' +
+        '<div class="field"><label for="link-operator-select">Operator account</label><select id="link-operator-select">' + options + '</select></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Link account</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const id = document.getElementById("link-operator-select").value;
+        Loader.show("Linking…");
+        try {
+          const { error } = await supabase.from("profiles").update({ operator_id: operator.id }).eq("id", id);
+          if (error) throw error;
+          await Data.logAudit("operator_linked", "operator", operator.id, { profile_id: id });
+          Modal.close();
+          Toast.success("Account linked");
+          Router.go("admin-operators");
+        } catch (err) { Toast.error("Unable to link account", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+
+  /* =======================================================================
+     35. OPERATOR VIEWS
+     ======================================================================= */
+  async function ensureOperatorLink() {
+    if (AppState.role !== "operator" || !AppState.profile) return AppState.profile ? AppState.profile.operator_id : null;
+    if (AppState.profile.operator_id) return AppState.profile.operator_id;
+    const id = await callRpc("tc_ensure_operator_account");
+    if (id) AppState.profile.operator_id = id;
+    return id;
+  }
+
+  function operatorGuard(container) {
+    return ensureOperatorLink().then(function (id) {
+      if (!id) {
+        renderEmpty(container, { icon: "🏢", title: "No company linked", message: "Ask an administrator to link your login to your operator company." });
+        return false;
+      }
+      return true;
+    }).catch(function (err) { renderError(container, err.message); return false; });
+  }
+
+  Router.register("operator-dashboard", {
+    title: "Operator dashboard",
+    subtitle: "Your fleet, trips and earnings at a glance.",
+    render: async function (container) {
+      container.innerHTML =
+        '<section class="stat-grid" id="operator-stats"></section>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Quick actions</h3></div>' +
+          '<div class="card__body"><div class="button-group">' +
+            '<button type="button" class="button button--primary" data-op-go="operator-trips">➕ Schedule a trip</button>' +
+            '<button type="button" class="button button--secondary" data-op-go="operator-fleet">🚌 Manage vehicles</button>' +
+            '<button type="button" class="button button--secondary" data-op-go="operator-drivers">👨‍✈️ Manage drivers</button>' +
+            '<button type="button" class="button button--secondary" data-op-go="operator-reports">📈 View reports</button>' +
+          '</div></div></section>' +
+        '<section class="card"><div class="card__header"><h3 class="card__title">Next trips</h3></div>' +
+          '<div class="card__body card__body--flush" id="operator-next-trips"></div></section>';
+
+      container.querySelectorAll("[data-op-go]").forEach(function (b) {
+        b.addEventListener("click", function () { Router.go(b.getAttribute("data-op-go")); });
+      });
+      const stats = document.getElementById("operator-stats");
+      if (!(await operatorGuard(stats))) return;
+
+      try {
+        const d = await callRpc("tc_operator_dashboard");
+        stats.innerHTML =
+          statCard("🚌", d.vehicles, "Vehicles", "") +
+          statCard("👨‍✈️", d.drivers, "Drivers", "info") +
+          statCard("📅", d.trips_today, "Trips today", "accent") +
+          statCard("⏳", d.trips_upcoming, "Upcoming trips", "info") +
+          statCard("📍", d.trips_active, "On the road now", "success") +
+          statCard("🎫", d.bookings_total, "Seats booked", "success") +
+          statCard("💰", moneyOrDash(d.revenue_month), "Revenue this month", "success") +
+          statCard("🏦", moneyOrDash(d.revenue_total), "Total revenue", "");
+      } catch (err) { renderError(stats, err.message); return; }
+
+      const next = document.getElementById("operator-next-trips");
+      try {
+        const trips = await callRpc("tc_operator_trips", { p_limit: 100 });
+        const upcoming = (trips || []).filter(function (t) { return ["scheduled", "boarding", "in_transit"].indexOf(t.status) !== -1; })
+          .sort(function (a, b) { return new Date(a.planned_departure) - new Date(b.planned_departure); }).slice(0, 5);
+        if (!upcoming.length) {
+          renderEmpty(next, { icon: "🧭", title: "No upcoming trips", message: "Schedule a trip so passengers can book seats." });
+        } else {
+          next.innerHTML = '<div class="list">' + upcoming.map(function (t) {
+            return '<div class="list__item"><div class="list__main">' +
+              '<p class="list__title">' + escapeHtml(t.trip_code || "—") + ' · ' + escapeHtml(t.origin || "?") + ' → ' + escapeHtml(t.destination || "?") + '</p>' +
+              '<p class="list__meta">' + escapeHtml(formatDateTime(t.planned_departure)) + ' · ' + escapeHtml(t.registration_number || "—") +
+                ' · ' + escapeHtml(t.booked) + '/' + escapeHtml(t.capacity) + ' seats</p></div>' +
+              '<span class="badge badge--' + escapeHtml(t.status) + '">' + escapeHtml(humanizeStatus(t.status)) + '</span></div>';
+          }).join("") + '</div>';
+        }
+      } catch (err) { renderError(next, err.message); }
+    }
+  });
+
+  /* ---------- Vehicles ---------- */
+  Router.register("operator-fleet", {
+    title: "Vehicles",
+    subtitle: "Add buses, set their status and assign drivers.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="op-add-vehicle">+ Add vehicle</button>',
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="fleet-list"></div></div>';
+      const list = document.getElementById("fleet-list");
+      renderLoading(list, "Loading vehicles…");
+      if (!(await operatorGuard(list))) return;
+
+      let vehicles = [], drivers = [];
+      try {
+        const res = await Promise.all([callRpc("tc_operator_vehicles"), callRpc("tc_operator_drivers")]);
+        vehicles = res[0] || []; drivers = res[1] || [];
+      } catch (err) { renderError(list, err.message); return; }
+
+      const refresh = function () { Router.go("operator-fleet"); };
+      document.getElementById("op-add-vehicle").addEventListener("click", function () { openVehicleModal(null, refresh); });
+
+      if (!vehicles.length) {
+        renderEmpty(list, { icon: "🚌", title: "No vehicles yet", message: "Add your first vehicle to start scheduling trips." });
+        return;
+      }
+      list.innerHTML = '<div class="table-wrap"><table class="data-table"><thead><tr>' +
+        '<th>Registration</th><th>Type</th><th class="num">Seats</th><th>Driver</th><th>Status</th><th></th></tr></thead><tbody>' +
+        vehicles.map(function (v) {
+          return '<tr><td><strong>' + escapeHtml(v.registration_number) + '</strong></td>' +
+            '<td>' + escapeHtml(v.vehicle_type || "—") + '</td>' +
+            '<td class="num">' + escapeHtml(v.capacity) + '</td>' +
+            '<td>' + (v.driver_name ? escapeHtml(v.driver_name) : '<span class="text-muted">Unassigned</span>') + '</td>' +
+            '<td><span class="badge badge--' + escapeHtml(v.status || "active") + '">' + escapeHtml(humanizeStatus(v.status || "active")) + '</span></td>' +
+            '<td><div class="list__actions">' +
+              '<button type="button" class="button button--small button--secondary" data-veh-driver="' + escapeHtml(v.id) + '">Driver</button>' +
+              '<button type="button" class="button button--small button--ghost" data-veh-edit="' + escapeHtml(v.id) + '">Edit</button>' +
+              '<button type="button" class="button button--small button--danger" data-veh-delete="' + escapeHtml(v.id) + '">Remove</button>' +
+            '</div></td></tr>';
+        }).join("") + '</tbody></table></div>';
+
+      const byId = function (id) { return vehicles.find(function (x) { return String(x.id) === id; }); };
+      list.querySelectorAll("[data-veh-edit]").forEach(function (b) {
+        b.addEventListener("click", function () { openVehicleModal(byId(b.getAttribute("data-veh-edit")), refresh); });
+      });
+      list.querySelectorAll("[data-veh-driver]").forEach(function (b) {
+        b.addEventListener("click", function () { openAssignDriverModal(byId(b.getAttribute("data-veh-driver")), drivers, vehicles, refresh); });
+      });
+      list.querySelectorAll("[data-veh-delete]").forEach(function (b) {
+        b.addEventListener("click", async function () {
+          const v = byId(b.getAttribute("data-veh-delete"));
+          const ok = await Modal.confirm({
+            title: "Remove " + v.registration_number + "?",
+            message: "If this vehicle has past trips it is switched to inactive instead of being erased, so your reports stay correct.",
+            confirmLabel: "Remove vehicle", danger: true
+          });
+          if (!ok) return;
+          Loader.show("Removing…");
+          try {
+            const res = await callRpc("tc_operator_delete_vehicle", { p_id: v.id });
+            Toast.success(res && res.archived ? "Vehicle set to inactive" : "Vehicle removed");
+            refresh();
+          } catch (err) { Toast.error("Unable to remove vehicle", err.message); }
+          finally { Loader.hide(); }
+        });
+      });
+    }
+  });
+
+  function openVehicleModal(vehicle, onDone) {
+    const v = vehicle || {};
+    Modal.open({
+      title: vehicle ? "Edit vehicle" : "Add vehicle",
+      body:
+        '<div class="field"><label for="opveh-reg">Registration number</label>' +
+          '<input type="text" id="opveh-reg" maxlength="20" autocapitalize="characters" value="' + escapeHtml(v.registration_number || "") + '" placeholder="e.g. LSD 123 XY" /></div>' +
+        '<div class="field"><label for="opveh-type">Vehicle type</label>' +
+          '<input type="text" id="opveh-type" list="opveh-type-list" value="' + escapeHtml(v.vehicle_type || "") + '" placeholder="e.g. Bus, Danfo, Coaster" />' +
+          '<datalist id="opveh-type-list"><option value="Bus"><option value="Mini bus"><option value="Danfo"><option value="Coaster"><option value="Sienna"></datalist></div>' +
+        '<div class="field"><label for="opveh-capacity">Seats (1–100)</label>' +
+          '<input type="number" id="opveh-capacity" min="1" max="100" value="' + escapeHtml(v.capacity || "") + '" /></div>' +
+        '<div class="field"><label for="opveh-status">Status</label><select id="opveh-status">' +
+          ["active", "maintenance", "inactive"].map(function (s) {
+            return '<option value="' + s + '"' + ((v.status || "active") === s ? " selected" : "") + '>' + humanizeStatus(s) + '</option>';
+          }).join("") + '</select></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Save vehicle</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const reg = document.getElementById("opveh-reg").value.trim();
+        const capacity = parseInt(document.getElementById("opveh-capacity").value, 10);
+        if (!reg) { Toast.warning("Registration number required"); return; }
+        if (!capacity || capacity < 1 || capacity > 100) { Toast.warning("Seats must be between 1 and 100"); return; }
+        Loader.show("Saving…");
+        try {
+          await callRpc("tc_operator_save_vehicle", {
+            p_id: vehicle ? vehicle.id : null, p_registration: reg,
+            p_type: document.getElementById("opveh-type").value.trim() || null,
+            p_capacity: capacity, p_status: document.getElementById("opveh-status").value
+          });
+          Modal.close();
+          Toast.success(vehicle ? "Vehicle updated" : "Vehicle added");
+          if (onDone) onDone();
+        } catch (err) { Toast.error("Unable to save vehicle", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  function openAssignDriverModal(vehicle, drivers, vehicles, onDone) {
+    const onVehicle = {};
+    vehicles.forEach(function (x) { if (x.assigned_driver_id) onVehicle[x.assigned_driver_id] = x.registration_number; });
+    const options = drivers.map(function (d) {
+      const other = onVehicle[d.id] && String(d.id) !== String(vehicle.assigned_driver_id);
+      return '<option value="' + escapeHtml(d.id) + '"' + (String(d.id) === String(vehicle.assigned_driver_id) ? " selected" : "") + '>' +
+        escapeHtml((d.full_name || "Driver") + (d.status !== "approved" ? " (not approved yet)" : "") + (other ? " — currently on " + onVehicle[d.id] : "")) + '</option>';
+    }).join("");
+    Modal.open({
+      title: "Driver for " + vehicle.registration_number,
+      body: drivers.length
+        ? '<p class="text-muted mb-4">A driver can drive one vehicle at a time. Choosing a driver who is on another bus moves them here. Only approved drivers can run trips.</p>' +
+          '<div class="field"><label for="opveh-driver-select">Driver</label><select id="opveh-driver-select"><option value="">— No driver —</option>' + options + '</select></div>'
+        : '<p class="text-muted">You have no drivers yet. Add drivers first (Drivers → Add driver).</p>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        (drivers.length ? '<button type="button" class="button button--primary" data-modal-action="save">Save</button>' : ""),
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        Loader.show("Saving…");
+        try {
+          await callRpc("tc_operator_assign_vehicle", {
+            p_vehicle_id: vehicle.id, p_driver_id: document.getElementById("opveh-driver-select").value || null
+          });
+          Modal.close();
+          Toast.success("Driver assignment saved");
+          if (onDone) onDone();
+        } catch (err) { Toast.error("Unable to assign driver", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  /* ---------- Drivers ---------- */
+  Router.register("operator-drivers", {
+    title: "Drivers",
+    subtitle: "Drivers who work for your company. Administrators approve new drivers.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="op-add-driver">+ Add driver</button>',
+    render: async function (container) {
+      container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="op-drivers-list"></div></div>';
+      const list = document.getElementById("op-drivers-list");
+      renderLoading(list, "Loading drivers…");
+      if (!(await operatorGuard(list))) return;
+
+      let drivers = [];
+      try { drivers = (await callRpc("tc_operator_drivers")) || []; }
+      catch (err) { renderError(list, err.message); return; }
+
+      const refresh = function () { Router.go("operator-drivers"); };
+      document.getElementById("op-add-driver").addEventListener("click", function () { openAddDriverModal(refresh); });
+
+      if (!drivers.length) {
+        renderEmpty(list, { icon: "👨‍✈️", title: "No drivers yet", message: "Drivers register themselves (Create account → Driver). Then add them here with their email or phone number." });
+        return;
+      }
+      list.innerHTML = '<div class="list">' + drivers.map(function (d) {
+        return '<div class="list__item"><div class="list__main">' +
+          '<p class="list__title">' + escapeHtml(d.full_name || "—") + '</p>' +
+          '<p class="list__meta">' + escapeHtml(d.email || d.phone || "") + ' · ' +
+            (d.vehicle ? 'Vehicle ' + escapeHtml(d.vehicle) : 'No vehicle assigned') + '</p></div>' +
+          '<div class="list__actions">' +
+            '<span class="badge badge--' + escapeHtml(d.status || "pending") + '">' + escapeHtml(humanizeStatus(d.status || "pending")) + '</span>' +
+            '<button type="button" class="button button--small button--ghost" data-drv-remove="' + escapeHtml(d.id) + '">Remove</button>' +
+          '</div></div>';
+      }).join("") + '</div>';
+
+      list.querySelectorAll("[data-drv-remove]").forEach(function (b) {
+        b.addEventListener("click", async function () {
+          const d = drivers.find(function (x) { return String(x.id) === b.getAttribute("data-drv-remove"); });
+          const ok = await Modal.confirm({
+            title: "Remove " + (d.full_name || "driver") + "?",
+            message: "They stay registered on TransitCare but no longer work for your company, and are taken off any vehicle.",
+            confirmLabel: "Remove driver", danger: true
+          });
+          if (!ok) return;
+          Loader.show("Removing…");
+          try { await callRpc("tc_operator_remove_driver", { p_driver_id: d.id }); Toast.success("Driver removed"); refresh(); }
+          catch (err) { Toast.error("Unable to remove driver", err.message); }
+          finally { Loader.hide(); }
+        });
+      });
+    }
+  });
+
+  function openAddDriverModal(onDone) {
+    Modal.open({
+      title: "Add a driver",
+      body: '<p class="text-muted mb-4">The driver must already have a TransitCare driver account. Enter the email or phone number they registered with.</p>' +
+        '<div class="field"><label for="opdrv-identifier">Driver\'s email or phone</label>' +
+        '<input type="text" id="opdrv-identifier" autocomplete="off" placeholder="driver@email.com or 0803 000 0000" /></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Add driver</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const id = document.getElementById("opdrv-identifier").value.trim();
+        if (!id) { Toast.warning("Enter the driver's email or phone"); return; }
+        Loader.show("Adding…");
+        try {
+          const res = await callRpc("tc_operator_add_driver", { p_identifier: id });
+          Modal.close();
+          Toast.success("Driver added", (res && res.name ? res.name : "Driver") + " now works for your company.");
+          if (onDone) onDone();
+        } catch (err) { Toast.error("Unable to add driver", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  /* ---------- Trips ---------- */
+  Router.register("operator-trips", {
+    title: "Trips",
+    subtitle: "Schedule trips, see who booked and cancel when needed.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="op-add-trip">+ Schedule trip</button>',
+    render: async function (container) {
+      container.innerHTML =
+        '<div class="toolbar"><div class="field"><label for="optrips-filter">Show</label>' +
+        '<select id="optrips-filter"><option value="">All trips</option><option value="open">Upcoming &amp; active</option>' +
+        '<option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></div></div>' +
+        '<div class="card"><div class="card__body card__body--flush" id="op-trips-list"></div></div>';
+      const list = document.getElementById("op-trips-list");
+      renderLoading(list, "Loading trips…");
+      if (!(await operatorGuard(list))) return;
+
+      let trips = [];
+      try { trips = (await callRpc("tc_operator_trips", { p_limit: 200 })) || []; }
+      catch (err) { renderError(list, err.message); return; }
+
+      const refresh = function () { Router.go("operator-trips"); };
+      document.getElementById("op-add-trip").addEventListener("click", function () { openScheduleTripModal(refresh); });
+
+      function draw() {
+        const f = document.getElementById("optrips-filter").value;
+        const rows = trips.filter(function (t) {
+          if (f === "open") return ["scheduled", "boarding", "in_transit"].indexOf(t.status) !== -1;
+          if (f) return t.status === f;
+          return true;
+        });
+        if (!rows.length) {
+          renderEmpty(list, { icon: "🧭", title: "No trips", message: trips.length ? "No trips match this filter." : "Schedule your first trip so passengers can book seats." });
+          return;
+        }
+        list.innerHTML = '<div class="table-wrap"><table class="data-table"><thead><tr>' +
+          '<th>Trip</th><th>Route</th><th>Vehicle · driver</th><th>Departure</th><th class="num">Seats</th><th class="num">Revenue</th><th>Status</th><th></th></tr></thead><tbody>' +
+          rows.map(function (t) {
+            const canCancel = t.status === "scheduled" || t.status === "boarding";
+            return '<tr><td><strong>' + escapeHtml(t.trip_code || "—") + '</strong></td>' +
+              '<td>' + escapeHtml(t.origin || "?") + ' → ' + escapeHtml(t.destination || "?") + '</td>' +
+              '<td>' + escapeHtml(t.registration_number || "—") + '<br><span class="text-muted text-small">' + escapeHtml(t.driver_name || "No driver") + '</span></td>' +
+              '<td>' + escapeHtml(formatDateTime(t.planned_departure)) + '</td>' +
+              '<td class="num">' + escapeHtml(t.booked) + '/' + escapeHtml(t.capacity) + '</td>' +
+              '<td class="num">' + escapeHtml(moneyOrDash(t.revenue)) + '</td>' +
+              '<td><span class="badge badge--' + escapeHtml(t.status || "scheduled") + '">' + escapeHtml(humanizeStatus(t.status)) + '</span></td>' +
+              '<td><div class="list__actions">' +
+                '<button type="button" class="button button--small button--secondary" data-trip-pax="' + escapeHtml(t.id) + '">Passengers</button>' +
+                (canCancel ? '<button type="button" class="button button--small button--danger" data-trip-cancel="' + escapeHtml(t.id) + '">Cancel</button>' : "") +
+              '</div></td></tr>';
+          }).join("") + '</tbody></table></div>';
+
+        list.querySelectorAll("[data-trip-pax]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            const t = trips.find(function (x) { return String(x.id) === b.getAttribute("data-trip-pax"); });
+            openPassengersModal(t);
+          });
+        });
+        list.querySelectorAll("[data-trip-cancel]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            const t = trips.find(function (x) { return String(x.id) === b.getAttribute("data-trip-cancel"); });
+            openCancelTripModal(t, refresh);
+          });
+        });
+      }
+      document.getElementById("optrips-filter").addEventListener("change", draw);
+      draw();
+    }
+  });
+
+  async function openPassengersModal(trip) {
+    Modal.open({
+      title: "Passengers · " + (trip.trip_code || ""),
+      body: '<div id="op-pax-body"><p class="text-muted">Loading…</p></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="close">Close</button>',
+      onAction: function () { Modal.close(); }
+    });
+    const body = document.getElementById("op-pax-body");
+    try {
+      const rows = (await callRpc("tc_operator_trip_passengers", { p_trip_id: trip.id })) || [];
+      if (!body) return;
+      if (!rows.length) { body.innerHTML = '<p class="text-muted">No seats booked on this trip yet.</p>'; return; }
+      body.innerHTML = '<div class="table-wrap"><table class="data-table"><thead><tr><th>Seat</th><th>Passenger</th><th>Phone</th><th>Status</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td>' + escapeHtml(r.seat_number || "—") + '</td><td>' + escapeHtml(r.passenger || "—") + '</td>' +
+            '<td>' + escapeHtml(r.phone || "—") + '</td>' +
+            '<td><span class="badge badge--' + escapeHtml(r.status || "reserved") + '">' + escapeHtml(humanizeStatus(r.status)) + '</span></td></tr>';
+        }).join("") + '</tbody></table></div>';
+    } catch (err) { if (body) body.innerHTML = '<p class="text-danger">' + escapeHtml(err.message) + '</p>'; }
+  }
+
+  async function openScheduleTripModal(onDone) {
+    let vehicles = [], routes = [], terminals = [];
+    try {
+      const res = await Promise.all([callRpc("tc_operator_vehicles"), Data.getRoutes(true), Data.getTerminals(true)]);
+      vehicles = res[0] || []; routes = res[1] || []; terminals = res[2] || [];
+    } catch (err) { Toast.error("Unable to load form", err.message); return; }
+
+    const usable = vehicles.filter(function (v) { return (v.status || "active") === "active"; });
+    if (!usable.length) { Toast.warning("No active vehicles", "Add a vehicle and assign an approved driver first."); return; }
+    if (!routes.length) { Toast.warning("No routes available", "An administrator must add routes first."); return; }
+
+    const d = new Date(Date.now() + 2 * 3600000);
+    const defaultDeparture = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+    Modal.open({
+      title: "Schedule a trip",
+      body:
+        '<div class="field"><label for="optrip-vehicle">Vehicle</label><select id="optrip-vehicle">' +
+          usable.map(function (v) {
+            return '<option value="' + escapeHtml(v.id) + '">' + escapeHtml(v.registration_number + " · " + v.capacity + " seats · " + (v.driver_name || "NO DRIVER")) + '</option>';
+          }).join("") + '</select></div>' +
+        '<div class="field"><label for="optrip-route">Route</label><select id="optrip-route">' +
+          routes.map(function (r) { return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.origin + " → " + r.destination) + '</option>'; }).join("") + '</select></div>' +
+        '<div class="field"><label for="optrip-terminal">Terminal (optional)</label><select id="optrip-terminal"><option value="">— None —</option>' +
+          terminals.map(function (t) { return '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>'; }).join("") + '</select></div>' +
+        '<div class="field"><label for="optrip-departure">Departure</label><input type="datetime-local" id="optrip-departure" value="' + defaultDeparture + '" /></div>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Schedule trip</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const dep = document.getElementById("optrip-departure").value;
+        if (!dep) { Toast.warning("Choose a departure time"); return; }
+        Loader.show("Scheduling…");
+        try {
+          const res = await callRpc("tc_operator_schedule_trip", {
+            p_vehicle_id: document.getElementById("optrip-vehicle").value,
+            p_route_id: document.getElementById("optrip-route").value,
+            p_terminal_id: document.getElementById("optrip-terminal").value || null,
+            p_departure: new Date(dep).toISOString()
+          });
+          Modal.close();
+          Toast.success("Trip scheduled", "Trip " + (res && res.trip_code ? res.trip_code : "") + " is open for booking.");
+          if (onDone) onDone();
+        } catch (err) { Toast.error("Unable to schedule trip", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  /* ---------- Reports ---------- */
+  Router.register("operator-reports", {
+    title: "Reports",
+    subtitle: "Bookings and revenue for your fleet.",
+    render: async function (container) {
+      const today = new Date();
+      const iso = function (dt) { return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+      const monthAgo = new Date(today.getTime() - 29 * 86400000);
+
+      container.innerHTML =
+        '<div class="toolbar">' +
+          '<div class="field"><label for="oprev-from">From</label><input type="date" id="oprev-from" value="' + iso(monthAgo) + '" /></div>' +
+          '<div class="field"><label for="oprev-to">To</label><input type="date" id="oprev-to" value="' + iso(today) + '" /></div>' +
+          '<button type="button" class="button button--primary" id="oprev-apply">Show report</button>' +
+          '<button type="button" class="button button--ghost" id="oprev-csv" disabled>Download CSV</button>' +
+        '</div><div id="oprev-body"></div>';
+      const body = document.getElementById("oprev-body");
+      if (!(await operatorGuard(body))) return;
+
+      let current = null;
+
+      function table(title, rows, labelHead) {
+        if (!rows.length) return "";
+        return '<section class="card"><div class="card__header"><h3 class="card__title">' + escapeHtml(title) + '</h3></div>' +
+          '<div class="card__body card__body--flush"><div class="table-wrap"><table class="data-table"><thead><tr><th>' + escapeHtml(labelHead) +
+          '</th><th class="num">Seats booked</th><th class="num">Revenue</th></tr></thead><tbody>' +
+          rows.map(function (r) {
+            return '<tr><td>' + escapeHtml(r.label || (r.day ? formatDate(r.day) : "—")) + '</td><td class="num">' + escapeHtml(r.bookings) +
+              '</td><td class="num">' + escapeHtml(moneyOrDash(r.revenue)) + '</td></tr>';
+          }).join("") + '</tbody></table></div></div></section>';
+      }
+
+      async function load() {
+        renderLoading(body, "Building report…");
+        document.getElementById("oprev-csv").disabled = true;
+        try {
+          const r = await callRpc("tc_operator_revenue", {
+            p_from: document.getElementById("oprev-from").value || null,
+            p_to: document.getElementById("oprev-to").value || null
+          });
+          current = r;
+          body.innerHTML =
+            '<section class="stat-grid">' +
+              statCard("🧭", r.trips, "Trips", "info") + statCard("🎫", r.bookings, "Seats booked", "success") +
+              statCard("💰", moneyOrDash(r.revenue), "Revenue", "success") + '</section>' +
+            table("By route", r.by_route || [], "Route") + table("By vehicle", r.by_vehicle || [], "Vehicle") + table("By day", r.by_day || [], "Day");
+          if (!r.trips) body.insertAdjacentHTML("beforeend", '<p class="text-muted">No trips in this period.</p>');
+          document.getElementById("oprev-csv").disabled = !r.trips;
+        } catch (err) { renderError(body, err.message); }
+      }
+
+      document.getElementById("oprev-apply").addEventListener("click", load);
+      document.getElementById("oprev-csv").addEventListener("click", function () {
+        if (!current) return;
+        const rows = [["Section", "Name", "Seats booked", "Revenue (NGN)"]];
+        (current.by_route || []).forEach(function (x) { rows.push(["Route", x.label, x.bookings, x.revenue]); });
+        (current.by_vehicle || []).forEach(function (x) { rows.push(["Vehicle", x.label, x.bookings, x.revenue]); });
+        (current.by_day || []).forEach(function (x) { rows.push(["Day", x.day, x.bookings, x.revenue]); });
+        downloadCsv("transitcare-report-" + current.from + "-to-" + current.to + ".csv", rows);
+      });
+      load();
+    }
+  });
+
+  /* ---------- Company ---------- */
+  Router.register("operator-company", {
+    title: "Company",
+    subtitle: "Your transport company details.",
+    render: async function (container) {
+      container.innerHTML = '<div id="op-company-root"></div>';
+      const root = document.getElementById("op-company-root");
+      renderLoading(root, "Loading…");
+      if (!(await operatorGuard(root))) return;
+      let c;
+      try { c = await callRpc("tc_operator_company"); } catch (err) { renderError(root, err.message); return; }
+      if (!c) { renderEmpty(root, { icon: "🏢", title: "No company linked", message: "Ask an administrator to link your login to your company." }); return; }
+
+      root.innerHTML =
+        '<section class="card"><div class="card__header"><h3 class="card__title">Company details</h3>' +
+          '<span class="badge badge--' + escapeHtml(c.status || "active") + '">' + escapeHtml(humanizeStatus(c.status || "active")) + '</span></div>' +
+        '<div class="card__body"><form id="company-form" novalidate>' +
+          '<div class="field"><label for="opco-name">Company name</label><input type="text" id="opco-name" maxlength="80" value="' + escapeHtml(c.name || "") + '" /></div>' +
+          '<div class="field"><label for="opco-contact">Contact person</label><input type="text" id="opco-contact" maxlength="80" value="' + escapeHtml(c.contact_name || "") + '" /></div>' +
+          '<div class="field"><label for="opco-phone">Phone</label><input type="tel" id="opco-phone" value="' + escapeHtml(c.phone || "") + '" /></div>' +
+          '<div class="field"><label for="opco-email">Email</label><input type="email" id="opco-email" value="' + escapeHtml(c.email || "") + '" /></div>' +
+          '<div class="form-actions"><button type="submit" class="button button--primary">Save changes</button></div>' +
+        '</form></div></section>';
+
+      document.getElementById("company-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const name = document.getElementById("opco-name").value.trim();
+        const email = document.getElementById("opco-email").value.trim();
+        if (!name) { Toast.warning("Company name required"); return; }
+        if (email && !Validators.email(email)) { Toast.warning("Enter a valid email address"); return; }
+        Loader.show("Saving…");
+        try {
+          await callRpc("tc_operator_update_company", {
+            p_name: name, p_contact: document.getElementById("opco-contact").value.trim(),
+            p_phone: document.getElementById("opco-phone").value.trim(), p_email: email
+          });
+          Toast.success("Company details saved");
+        } catch (err) { Toast.error("Unable to save", err.message); }
+        finally { Loader.hide(); }
+      });
+    }
+  });
+
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap);
