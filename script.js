@@ -77,8 +77,9 @@
   }
 
   const CDN = {
-    QRCODE: "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js",
-    JSQR: "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
+    // Bundled in the /vendor folder so tickets and scanning never depend on a CDN.
+    QRCODE: "vendor/qrcode-generator.js?v=8",
+    JSQR: "vendor/jsQR.min.js?v=8",
     LEAFLET_JS: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
     LEAFLET_CSS: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
   };
@@ -885,6 +886,7 @@
       { group: "Overview" },
       { key: "admin-dashboard", label: "Dashboard",       icon: "📊" },
       { key: "admin-users",     label: "Users",           icon: "👥" },
+      { key: "admin-admins",    label: "Administrators",  icon: "🛡️" },
       { key: "admin-drivers",   label: "Driver approval", icon: "✅" },
       { key: "admin-operators", label: "Operators",       icon: "🏢" },
       { group: "Transport" },
@@ -1065,6 +1067,16 @@
       const { data, error } = await query;
       if (error) throw error;
       return data || [];
+    },
+
+    /* route_id -> [terminal_id,...]. Returns null when the table is not installed yet (SQL 005 not run). */
+    async getRouteTerminals() {
+      if (!supabase) return null;
+      const { data, error } = await supabase.from("route_terminals").select("route_id, terminal_id");
+      if (error) return null;
+      const map = {};
+      (data || []).forEach(function (row) { (map[row.route_id] = map[row.route_id] || []).push(row.terminal_id); });
+      return map;
     },
 
     async getVehicles(operatorId) {
@@ -1690,7 +1702,7 @@
           '</dl>' +
           '<div class="ticket-card__qr">' +
             '<div id="qr-' + escapeHtml(ticket ? ticket.id : "none-" + booking.id) + '"></div>' +
-            '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding.</p>' +
+            '<p class="ticket-card__qr-caption">Show this QR code to the driver when boarding. Tap it to enlarge. If it will not scan, read out the ticket number under it.</p>' +
           '</div>' +
           (isBookingTrackable(booking) ? '<div class="ticket-card__track">' + renderTrackBookingButton(booking, "button--block") + '</div>' : "") +
         '</div>' +
@@ -1698,21 +1710,46 @@
     );
   }
 
+  // Draws the QR code for a ticket with the ticket number printed UNDER it.
+  // The QR library is bundled in /vendor, so this works even when the CDN is unreachable.
+  function qrSvgFor(text) {
+    if (typeof window.qrcode !== "function") throw new Error("QR library missing");
+    const qr = window.qrcode(0, "M");
+    qr.addData(String(text));
+    qr.make();
+    return qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true });
+  }
+
   async function renderQrForTicket(text, containerId) {
     const container = document.getElementById(containerId);
     if (!container) return;
+    const number = '<p class="ticket-card__qr-number">' + escapeHtml(text) + '</p>';
     try {
       await loadExternalScript(CDN.QRCODE);
-      if (window.QRCode && window.QRCode.toCanvas) {
-        const canvas = document.createElement("canvas");
-        container.appendChild(canvas);
-        window.QRCode.toCanvas(canvas, text, { width: 168, margin: 1 }, function () {});
-      } else {
-        container.innerHTML = '<p class="text-tiny text-muted">QR code: ' + escapeHtml(text) + '</p>';
-      }
+      container.innerHTML =
+        '<button type="button" class="qr-box" data-qr-enlarge="' + escapeHtml(text) + '" aria-label="Show a larger QR code for ticket ' + escapeHtml(text) + '">' +
+          qrSvgFor(text) + '</button>' + number;
     } catch (err) {
-      container.innerHTML = '<p class="text-tiny text-muted">QR code: ' + escapeHtml(text) + '</p>';
+      console.warn("[TransitCare] QR could not be drawn:", err && err.message);
+      container.innerHTML =
+        '<div class="qr-fallback">The QR code could not be drawn on this device.</div>' + number +
+        '<p class="ticket-card__qr-caption">Give the driver this ticket number.</p>';
     }
+  }
+
+  async function openQrModal(text) {
+    try { await loadExternalScript(CDN.QRCODE); } catch (e) { /* handled below */ }
+    let svg = "";
+    try { svg = qrSvgFor(text); } catch (e) { svg = ""; }
+    Modal.open({
+      title: "Your ticket",
+      body:
+        '<div class="qr-large">' + (svg ? '<div class="qr-box qr-box--large">' + svg + '</div>' : '<div class="qr-fallback">The QR code could not be drawn.</div>') +
+        '<p class="ticket-card__qr-number">' + escapeHtml(text) + '</p>' +
+        '<p class="ticket-card__qr-caption">Hold your phone steady and let the driver scan this code. Turn your screen brightness up if it will not scan.</p></div>',
+      footer: '<button type="button" class="button button--primary" data-modal-action="close">Done</button>',
+      onAction: function () { Modal.close(); }
+    });
   }
 
   Router.register("track-trip", {
@@ -2146,7 +2183,8 @@
             '<div class="field"><label for="trip-route">Route</label>' +
               '<select id="trip-route" required><option value="">Loading…</option></select></div>' +
             '<div class="field"><label for="trip-terminal">Terminal</label>' +
-              '<select id="trip-terminal"><option value="">Loading…</option></select></div>' +
+              '<select id="trip-terminal"><option value="">Loading…</option></select>' +
+              '<p class="field__hint text-muted text-small" id="trip-terminal-hint"></p></div>' +
             '<div class="field"><label for="trip-departure">Planned departure</label>' +
               '<input type="datetime-local" id="trip-departure" required /></div>' +
           '</div>' +
@@ -2174,8 +2212,11 @@
             return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.origin) + ' → ' + escapeHtml(r.destination) + '</option>';
           }).join("");
 
-        terminalSelect.innerHTML = '<option value="">Select a terminal</option>' +
-          terminals.map(function (t) { return '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>'; }).join("");
+        const linkMap = await Data.getRouteTerminals();
+        const hint = document.getElementById("trip-terminal-hint");
+        function refreshTerminals() { fillTerminalSelect(terminalSelect, hint, terminals, linkMap, routeSelect.value, false); }
+        routeSelect.addEventListener("change", refreshTerminals);
+        refreshTerminals();
       } catch (err) { Toast.error("Unable to load form data", err.message); }
 
       const depInput = document.getElementById("trip-departure");
@@ -2195,6 +2236,10 @@
           Toast.warning("Missing fields", "Please select a vehicle, route and departure time.");
           return;
         }
+        if (terminalSelect.dataset.required === "1" && !terminalId) {
+          Toast.warning("Select a terminal", "Choose the terminal this bus will leave from.");
+          return;
+        }
 
         Loader.show("Creating trip…");
         try {
@@ -2212,7 +2257,10 @@
             data = res.data; error = res.error;
             if (!error || error.code !== "23505") break;   // retry only on a duplicate trip code
           }
-          if (error) throw error;
+          if (error) {
+            if (error.code === "23514" || /does not serve/i.test(error.message || "")) throw new Error("That terminal does not serve the selected route. Please choose one from the list.");
+            throw error;
+          }
 
           await Data.logAudit("trip_created", "trip", data.id, { route_id: routeId });
           Toast.success("Bus is now available", "Passengers can now see and book this trip.");
@@ -2660,9 +2708,11 @@
     });
   }
 
+  function isRpcMissing(err) { return err && err.code === "RPC_MISSING"; }
+
   Router.register("admin-terminals", {
     title: "Terminals",
-    subtitle: "Boarding points across the network.",
+    subtitle: "Boarding points across the network. Add, edit or delete them.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-terminal">+ Add terminal</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="terminals-list"></div></div>';
@@ -2670,7 +2720,7 @@
       renderLoading(list, "Loading terminals…");
 
       const addBtn = document.getElementById("add-terminal");
-      if (addBtn) addBtn.addEventListener("click", openAddTerminalModal);
+      if (addBtn) addBtn.addEventListener("click", function () { openTerminalModal(null); });
 
       try {
         const data = await Data.getTerminals();
@@ -2681,40 +2731,69 @@
         list.innerHTML = '<div class="list">' + data.map(function (t) {
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(t.name) + '</p>' +
-            '<p class="list__meta">' + escapeHtml(t.location || "") + ' · ' + escapeHtml(t.contact_info || "") + '</p></div>' +
-            '<span class="badge badge--' + escapeHtml(t.status || "active") + '">' +
-              escapeHtml(humanizeStatus(t.status || "active")) + '</span></div>';
+            '<p class="list__meta">' + escapeHtml([t.location, t.contact_info].filter(Boolean).join(" · ")) + '</p></div>' +
+            '<span class="badge badge--' + escapeHtml(t.status || "active") + '">' + escapeHtml(humanizeStatus(t.status || "active")) + '</span>' +
+            '<div class="list__actions">' +
+              '<button type="button" class="button button--small button--ghost" data-edit-terminal="' + escapeHtml(t.id) + '">Edit</button> ' +
+              '<button type="button" class="button button--small button--danger" data-delete-terminal="' + escapeHtml(t.id) + '">Delete</button>' +
+            '</div></div>';
         }).join("") + '</div>';
+        list.querySelectorAll("[data-edit-terminal]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            openTerminalModal(data.find(function (x) { return x.id === btn.getAttribute("data-edit-terminal"); }));
+          });
+        });
+        list.querySelectorAll("[data-delete-terminal]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const t = data.find(function (x) { return x.id === btn.getAttribute("data-delete-terminal"); });
+            if (t) openDeleteTerminalModal(t);
+          });
+        });
       } catch (err) { renderError(list, err.message); }
     }
   });
 
-  function openAddTerminalModal() {
+  function openTerminalModal(terminal) {
+    const editing = !!terminal;
+    const t = terminal || {};
     Modal.open({
-      title: "Add terminal",
-      body: '<div class="field"><label for="term-name">Terminal name</label><input type="text" id="term-name" /></div>' +
-        '<div class="field"><label for="term-location">Location</label><input type="text" id="term-location" /></div>' +
-        '<div class="field"><label for="term-desc">Description</label><textarea id="term-desc"></textarea></div>' +
-        '<div class="field"><label for="term-contact">Contact information</label><input type="text" id="term-contact" /></div>',
+      title: editing ? "Edit terminal" : "Add terminal",
+      body: '<div class="field"><label for="term-name">Terminal name</label><input type="text" id="term-name" value="' + escapeHtml(t.name || "") + '" /></div>' +
+        '<div class="field"><label for="term-location">Location</label><input type="text" id="term-location" value="' + escapeHtml(t.location || "") + '" /></div>' +
+        '<div class="field"><label for="term-desc">Description</label><textarea id="term-desc">' + escapeHtml(t.description || "") + '</textarea></div>' +
+        '<div class="field"><label for="term-contact">Contact information</label><input type="text" id="term-contact" value="' + escapeHtml(t.contact_info || "") + '" /></div>' +
+        '<div class="field"><label for="term-status">Status</label><select id="term-status">' +
+          '<option value="active"' + ((t.status || "active") === "active" ? " selected" : "") + '>Active (available to drivers)</option>' +
+          '<option value="inactive"' + (t.status === "inactive" ? " selected" : "") + '>Inactive (hidden from new trips)</option></select></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
       onAction: async function (action) {
         if (action === "cancel") { Modal.close(); return; }
         const name = document.getElementById("term-name").value.trim();
         if (!name) { Toast.warning("Name required"); return; }
+        const fields = {
+          name: name,
+          location: document.getElementById("term-location").value.trim() || null,
+          description: document.getElementById("term-desc").value.trim() || null,
+          contact_info: document.getElementById("term-contact").value.trim() || null,
+          status: document.getElementById("term-status").value
+        };
         Loader.show("Saving…");
         try {
-          const { error } = await supabase.from("terminals").insert({
-            name: name,
-            location: document.getElementById("term-location").value.trim() || null,
-            description: document.getElementById("term-desc").value.trim() || null,
-            contact_info: document.getElementById("term-contact").value.trim() || null,
-            status: "active"
-          });
-          if (error) throw error;
+          try {
+            await callRpc("tc_admin_save_terminal", {
+              p_id: editing ? t.id : null, p_name: fields.name, p_location: fields.location,
+              p_description: fields.description, p_contact: fields.contact_info, p_status: fields.status
+            });
+          } catch (err) {
+            if (!isRpcMissing(err)) throw err;
+            // Database update 005 not installed yet: fall back to a plain save.
+            const res = editing ? await supabase.from("terminals").update(fields).eq("id", t.id) : await supabase.from("terminals").insert(fields);
+            if (res.error) throw res.error;
+          }
           AppState.cache.terminals = null;
           Modal.close();
-          Toast.success("Terminal added");
+          Toast.success(editing ? "Terminal updated" : "Terminal added");
           Router.go("admin-terminals");
         } catch (err) { Toast.error("Unable to save", err.message); }
         finally { Loader.hide(); }
@@ -2722,44 +2801,100 @@
     });
   }
 
+  function openDeleteTerminalModal(terminal) {
+    Modal.open({
+      title: "Delete terminal",
+      body: '<p>Delete <strong>' + escapeHtml(terminal.name) + '</strong>? This cannot be undone.</p>' +
+        '<p class="text-muted text-small">If trips already use this terminal it cannot be deleted. Set it to Inactive instead.</p>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--danger" data-modal-action="delete">Delete terminal</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        Loader.show("Deleting…");
+        try {
+          await callRpc("tc_admin_delete_terminal", { p_id: terminal.id });
+          AppState.cache.terminals = null;
+          Modal.close();
+          Toast.success("Terminal deleted");
+          Router.go("admin-terminals");
+        } catch (err) { Toast.error("Unable to delete", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
   Router.register("admin-routes", {
     title: "Routes",
-    subtitle: "Origins, destinations and fares.",
+    subtitle: "Origins, destinations, fares and the terminals each route departs from.",
     headerActions: '<button type="button" class="button button--primary button--small" id="add-route">+ Add route</button>',
     render: async function (container) {
       container.innerHTML = '<div class="card"><div class="card__body card__body--flush" id="routes-list"></div></div>';
       const list = document.getElementById("routes-list");
       renderLoading(list, "Loading routes…");
 
-      const addBtn = document.getElementById("add-route");
-      if (addBtn) addBtn.addEventListener("click", openAddRouteModal);
-
       try {
-        const data = await Data.getRoutes();
+        const results = await Promise.all([Data.getRoutes(), Data.getTerminals(), Data.getRouteTerminals()]);
+        const data = results[0], terminals = results[1], linkMap = results[2];
+
+        const addBtn = document.getElementById("add-route");
+        if (addBtn) addBtn.addEventListener("click", function () { openRouteModal(null, terminals, linkMap); });
+
         if (!data || data.length === 0) {
           renderEmpty(list, { icon: "🗺️", title: "No routes", message: "Add your first route." });
           return;
         }
         list.innerHTML = '<div class="list">' + data.map(function (r) {
+          const names = ((linkMap && linkMap[r.id]) || []).map(function (id) {
+            const t = terminals.find(function (x) { return x.id === id; }); return t ? t.name : null;
+          }).filter(Boolean);
           return '<div class="list__item"><div class="list__main">' +
             '<p class="list__title">' + escapeHtml(r.origin) + ' → ' + escapeHtml(r.destination) + '</p>' +
             '<p class="list__meta">' +
-              escapeHtml(r.estimated_minutes ? r.estimated_minutes + " min" : "") +
-              (r.base_fare ? ' · ' + formatCurrency(r.base_fare) : "") + '</p></div>' +
-            '<span class="badge badge--' + escapeHtml(r.status || "active") + '">' +
-              escapeHtml(humanizeStatus(r.status || "active")) + '</span></div>';
+              escapeHtml([r.estimated_minutes ? r.estimated_minutes + " min" : "", r.base_fare ? formatCurrency(r.base_fare) : ""].filter(Boolean).join(" · ")) + '</p>' +
+            (linkMap ? '<p class="list__meta">Departs from: ' + escapeHtml(names.length ? names.join(", ") : "not set") + '</p>' : "") + '</div>' +
+            '<span class="badge badge--' + escapeHtml(r.status || "active") + '">' + escapeHtml(humanizeStatus(r.status || "active")) + '</span>' +
+            '<div class="list__actions">' +
+              '<button type="button" class="button button--small button--ghost" data-edit-route="' + escapeHtml(r.id) + '">Edit</button> ' +
+              '<button type="button" class="button button--small button--danger" data-delete-route="' + escapeHtml(r.id) + '">Delete</button>' +
+            '</div></div>';
         }).join("") + '</div>';
+        list.querySelectorAll("[data-edit-route]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            openRouteModal(data.find(function (x) { return x.id === btn.getAttribute("data-edit-route"); }), terminals, linkMap);
+          });
+        });
+        list.querySelectorAll("[data-delete-route]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const r = data.find(function (x) { return x.id === btn.getAttribute("data-delete-route"); });
+            if (r) openDeleteRouteModal(r);
+          });
+        });
       } catch (err) { renderError(list, err.message); }
     }
   });
 
-  function openAddRouteModal() {
+  function openRouteModal(route, terminals, linkMap) {
+    const editing = !!route;
+    const r = route || {};
+    const chosen = (editing && linkMap && linkMap[r.id]) || [];
+    const termBox = linkMap
+      ? '<fieldset class="field"><legend>Departure terminals</legend>' +
+          '<p class="text-muted text-small">Drivers will only be able to pick these terminals for this route. Tick every terminal where this route boards.</p>' +
+          (terminals.length ? terminals.map(function (t) {
+            return '<label class="checkbox-row"><input type="checkbox" data-route-terminal="' + escapeHtml(t.id) + '"' +
+              (chosen.indexOf(t.id) !== -1 ? " checked" : "") + ' /> ' + escapeHtml(t.name) +
+              (t.status === "inactive" ? ' <span class="text-muted">(inactive)</span>' : "") + '</label>';
+          }).join("") : '<p class="text-muted">No terminals yet. Add terminals first.</p>') + '</fieldset>'
+      : '<p class="text-muted text-small">Run database update 005 to choose departure terminals for each route.</p>';
     Modal.open({
-      title: "Add route",
-      body: '<div class="field"><label for="route-origin">Origin</label><input type="text" id="route-origin" /></div>' +
-        '<div class="field"><label for="route-destination">Destination</label><input type="text" id="route-destination" /></div>' +
-        '<div class="field"><label for="route-fare">Base fare (₦)</label><input type="number" id="route-fare" min="0" step="50" /></div>' +
-        '<div class="field"><label for="route-minutes">Estimated minutes</label><input type="number" id="route-minutes" min="1" /></div>',
+      title: editing ? "Edit route" : "Add route",
+      body: '<div class="field"><label for="route-origin">Origin</label><input type="text" id="route-origin" value="' + escapeHtml(r.origin || "") + '" /></div>' +
+        '<div class="field"><label for="route-destination">Destination</label><input type="text" id="route-destination" value="' + escapeHtml(r.destination || "") + '" /></div>' +
+        '<div class="field"><label for="route-fare">Base fare (₦)</label><input type="number" id="route-fare" min="0" step="50" value="' + escapeHtml(r.base_fare == null ? "" : r.base_fare) + '" /></div>' +
+        '<div class="field"><label for="route-minutes">Estimated minutes</label><input type="number" id="route-minutes" min="1" value="' + escapeHtml(r.estimated_minutes == null ? "" : r.estimated_minutes) + '" /></div>' +
+        '<div class="field"><label for="route-status">Status</label><select id="route-status">' +
+          '<option value="active"' + ((r.status || "active") === "active" ? " selected" : "") + '>Active</option>' +
+          '<option value="inactive"' + (r.status === "inactive" ? " selected" : "") + '>Inactive</option></select></div>' + termBox,
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Save</button>',
       onAction: async function (action) {
@@ -2767,20 +2902,51 @@
         const origin = document.getElementById("route-origin").value.trim();
         const destination = document.getElementById("route-destination").value.trim();
         if (!origin || !destination) { Toast.warning("Origin and destination required"); return; }
+        const fareRaw = document.getElementById("route-fare").value;
+        const minRaw = document.getElementById("route-minutes").value;
+        const status = document.getElementById("route-status").value;
+        const ids = Array.prototype.map.call(document.querySelectorAll("[data-route-terminal]:checked"), function (el) { return el.getAttribute("data-route-terminal"); });
         Loader.show("Saving…");
         try {
-          const { error } = await supabase.from("routes").insert({
-            origin: origin, destination: destination,
-            base_fare: Number(document.getElementById("route-fare").value) || null,
-            estimated_minutes: Number(document.getElementById("route-minutes").value) || null,
-            status: "active"
-          });
-          if (error) throw error;
+          try {
+            await callRpc("tc_admin_save_route", {
+              p_id: editing ? r.id : null, p_origin: origin, p_destination: destination,
+              p_base_fare: fareRaw === "" ? null : Number(fareRaw), p_estimated_minutes: minRaw === "" ? null : Number(minRaw),
+              p_status: status, p_terminal_ids: linkMap ? ids : null
+            });
+          } catch (err) {
+            if (!isRpcMissing(err)) throw err;
+            const fields = { origin: origin, destination: destination, base_fare: Number(fareRaw) || null, estimated_minutes: Number(minRaw) || null, status: status };
+            const res = editing ? await supabase.from("routes").update(fields).eq("id", r.id) : await supabase.from("routes").insert(fields);
+            if (res.error) throw res.error;
+          }
           AppState.cache.routes = null;
           Modal.close();
-          Toast.success("Route added");
+          Toast.success(editing ? "Route updated" : "Route added");
           Router.go("admin-routes");
         } catch (err) { Toast.error("Unable to save", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  function openDeleteRouteModal(route) {
+    Modal.open({
+      title: "Delete route",
+      body: '<p>Delete <strong>' + escapeHtml(route.origin + " → " + route.destination) + '</strong>? This cannot be undone.</p>' +
+        '<p class="text-muted text-small">If trips already use this route it cannot be deleted. Set it to Inactive instead.</p>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--danger" data-modal-action="delete">Delete route</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        Loader.show("Deleting…");
+        try {
+          await callRpc("tc_admin_delete_route", { p_id: route.id });
+          AppState.cache.routes = null;
+          Modal.close();
+          Toast.success("Route deleted");
+          Router.go("admin-routes");
+        } catch (err) { Toast.error("Unable to delete", err.message); }
         finally { Loader.hide(); }
       }
     });
@@ -3474,7 +3640,7 @@
             // Send a fresh 6-digit code and take the user straight to the code screen.
             try { await Auth.resendVerification(email); } catch (e2) { /* the code screen has its own Resend */ }
             openEmailOtp(email);
-            setFormMessage("auth-message", "warning", "Your email is not verified yet. Enter the 6-digit code we just sent.");
+            setFormMessage("auth-message", "warning", "Your email is not verified yet. Enter the 6-digit code we just sent, or ask an administrator to verify your account.");
           } else {
             setFormMessage("auth-message", "danger", msg || "Unable to sign in.");
           }
@@ -3880,6 +4046,16 @@
         }
       }
 
+      // A suspended account is signed straight back out.
+      if (profile && profile.status === "suspended") {
+        AppState.isSigningIn = false;
+        try { await supabase.auth.signOut(); } catch (e) { /* ignore */ }
+        resetState();
+        showAuthScreen();
+        setFormMessage("auth-message", "danger", "This account has been suspended. Please contact an administrator.");
+        return;
+      }
+
       AppState.profile = profile;
       AppState.role = Profile.resolveRole(profile, session.user);
 
@@ -3924,6 +4100,8 @@
   // notification works without per-render wiring.
   function wireTrackingShortcuts() {
     document.addEventListener("click", function (event) {
+      const qrBtn = event.target.closest && event.target.closest("[data-qr-enlarge]");
+      if (qrBtn) { openQrModal(qrBtn.getAttribute("data-qr-enlarge")); return; }
       const btn = event.target.closest && event.target.closest("[data-track-booking]");
       if (btn) {
         const id = btn.getAttribute("data-track-booking");
@@ -4108,11 +4286,42 @@
   /* =======================================================================
      27. DATABASE FUNCTION CALLS (RPC)
      ======================================================================= */
+  /* Fill a terminal <select> with ONLY the terminals that serve the chosen route. */
+  function fillTerminalSelect(select, hint, terminals, linkMap, routeId, allowEmpty) {
+    if (!select) return;
+    const noneLabel = allowEmpty ? "— None —" : "Select a terminal";
+    function setHint(text) { if (hint) hint.textContent = text || ""; }
+    select.dataset.required = "";
+    if (!routeId) {
+      select.innerHTML = '<option value="">Select a route first</option>';
+      select.disabled = true; setHint("Choose a route and its departure terminals will appear here."); return;
+    }
+    let list = terminals;
+    if (linkMap) {
+      const ids = linkMap[routeId] || [];
+      list = ids.length ? terminals.filter(function (t) { return ids.indexOf(t.id) !== -1; }) : [];
+      if (!ids.length) {
+        // Route has no terminals configured: nothing to filter by, so keep every terminal available.
+        list = terminals;
+        setHint("No departure terminal is set for this route yet, so all terminals are shown.");
+      } else if (!list.length) {
+        select.innerHTML = '<option value="">No active terminal for this route</option>';
+        select.disabled = true; setHint("Every terminal linked to this route is inactive. Ask an administrator."); return;
+      } else {
+        select.dataset.required = "1";
+        setHint(list.length === 1 ? "This route departs from this terminal only." : "Showing only terminals that serve this route.");
+      }
+    } else { setHint(""); }
+    select.disabled = false;
+    select.innerHTML = (list.length === 1 && linkMap && (linkMap[routeId] || []).length ? "" : '<option value="">' + noneLabel + '</option>') +
+      list.map(function (t) { return '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>'; }).join("");
+  }
+
   function friendlyRpcError(error) {
     const msg = (error && error.message) || "Something went wrong.";
     let out;
     if ((error && error.code === "PGRST202") || /could not find the function|schema cache/i.test(msg)) {
-      out = new Error("This feature needs the latest database update. Run sql/002_features.sql in Supabase (SQL Editor), then try again.");
+      out = new Error("This feature needs the latest database update. In Supabase (SQL Editor) run the files in the sql folder in order: 001, 002, 003, 004, 005. Then try again.");
       out.code = "RPC_MISSING";
     } else {
       out = new Error(msg);
@@ -4729,7 +4938,7 @@
     EmailOtp.email = email;
     if (typeof AppState.showAuthForm === "function") AppState.showAuthForm("otp");
     const subtitle = document.getElementById("otp-subtitle");
-    if (subtitle) subtitle.innerHTML = "We sent a 6-digit code to <strong>" + escapeHtml(email) + "</strong>. Enter it below to activate your account.";
+    if (subtitle) subtitle.innerHTML = "We emailed <strong>" + escapeHtml(email) + "</strong> a <strong>confirmation email with a 6-digit code</strong>. Enter the code to activate your account.";
     const input = document.getElementById("otp-code");
     if (input) { input.value = ""; setTimeout(function () { input.focus(); }, 50); }
     const form = document.getElementById("otp-form");
@@ -4798,6 +5007,15 @@
       } finally { delete resend.dataset.busy; otpTick(); }
     });
 
+    document.getElementById("otp-signin").addEventListener("click", function () {
+      stopEmailOtpTimer();
+      clearFormErrors(form);
+      if (typeof AppState.showAuthForm === "function") AppState.showAuthForm("signin");
+      const em = document.getElementById("signin-email");
+      if (em && EmailOtp.email) em.value = EmailOtp.email;
+      setFormMessage("auth-message", "info", "Enter your password to sign in. If it says your email is not verified, ask an administrator to verify it.");
+    });
+
     document.getElementById("otp-change").addEventListener("click", function () {
       stopEmailOtpTimer();
       clearFormErrors(form);
@@ -4823,7 +5041,7 @@
     } catch (err) {
       if (button) { button.disabled = false; button.innerHTML = original; }
       setFormMessage("auth-message", "danger", err.code === "GOOGLE_DISABLED"
-        ? "Google sign-in is not switched on yet. Please use email for now."
+        ? "Google sign-in is not available yet. The site owner still needs to finish setting it up. Please sign up or sign in with your email for now."
         : (err.message || "Google sign-in could not be started."));
     }
   }
@@ -4854,9 +5072,11 @@
   /* =======================================================================
      34. ADMIN: DELETE USER ACCOUNTS
      ======================================================================= */
-  function openDeleteUserModal(user, onDone) {
+  function openDeleteUserModal(user, onDone, options) {
+    const rpcName = (options && options.rpc) || "tc_admin_delete_user";
     const role = user.role || "user";
     const consequences = {
+      admin: "They lose all access immediately. Things they created stay in the system without their name.",
       passenger: "Their tickets and seats on upcoming trips are removed. Past trips stay in the operator's records without their name.",
       driver: "Upcoming trips are cancelled and booked passengers are notified. Past trips are kept without a driver name.",
       operator: "Only this login is removed. The company record, vehicles and trips are kept."
@@ -4879,7 +5099,7 @@
         if (!typed || typed.value.trim().toUpperCase() !== "DELETE") return;
         Loader.show("Deleting account…");
         try {
-          await callRpc("tc_admin_delete_user", { p_user_id: user.id });
+          await callRpc(rpcName, rpcName === "tc_admin_delete_admin" ? { p_id: user.id } : { p_user_id: user.id });
           Modal.close();
           Toast.success("Account deleted", label + " was removed.");
           if (typeof onDone === "function") onDone();
@@ -4899,7 +5119,8 @@
 
   Router.register("admin-users", {
     title: "Users",
-    subtitle: "All registered accounts. Administrators can delete passenger, driver and operator accounts.",
+    subtitle: "All accounts. Add users, verify emails that did not arrive, or delete passenger, driver and operator accounts.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="add-user-button">+ Add user</button>',
     render: async function (container) {
       container.innerHTML =
         '<div class="toolbar">' +
@@ -4913,12 +5134,20 @@
       const list = document.getElementById("users-list");
       renderLoading(list, "Loading users…");
 
-      let users = [];
+      let users = [], hasVerifyInfo = true;
       try {
-        const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
-        if (error) throw error;
-        users = data || [];
+        try {
+          users = (await callRpc("tc_admin_list_users")) || [];
+        } catch (err) {
+          if (!isRpcMissing(err)) throw err;
+          hasVerifyInfo = false;   // database update 005 not run yet: plain list, no verify column
+          const { data, error } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
+          if (error) throw error;
+          users = data || [];
+        }
       } catch (err) { renderError(list, err.message); return; }
+      const addUserBtn = document.getElementById("add-user-button");
+      if (addUserBtn) addUserBtn.addEventListener("click", function () { openAddUserModal(function () { Router.go("admin-users"); }); });
 
       const me = AppState.authUser ? AppState.authUser.id : null;
 
@@ -4935,17 +5164,38 @@
           return;
         }
         list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-          '<thead><tr><th>Name</th><th>Email / phone</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>' +
+          '<thead><tr><th>Name</th><th>Email / phone</th><th>Role</th><th>Status</th>' + (hasVerifyInfo ? '<th>Email</th>' : '') + '<th></th></tr></thead><tbody>' +
           rows.map(function (u) {
             const canDelete = u.role !== "admin" && u.id !== me;
+            const needsVerify = hasVerifyInfo && u.email && !u.email_confirmed_at;
+            const verifyCell = hasVerifyInfo
+              ? '<td>' + (!u.email ? '<span class="text-muted text-small">—</span>'
+                  : (needsVerify ? '<span class="badge badge--pending">Not verified</span>' : '<span class="badge badge--active">Verified</span>')) + '</td>'
+              : '';
             return '<tr><td>' + escapeHtml(u.full_name || "—") + '</td>' +
               '<td>' + escapeHtml(u.email || u.phone || "—") + '</td>' +
               '<td><span class="badge">' + escapeHtml(humanizeStatus(u.role || "—")) + '</span></td>' +
-              '<td><span class="badge badge--' + escapeHtml(u.status || "active") + '">' + escapeHtml(humanizeStatus(u.status || "active")) + '</span></td>' +
-              '<td>' + (canDelete
+              '<td><span class="badge badge--' + escapeHtml(u.status || "active") + '">' + escapeHtml(humanizeStatus(u.status || "active")) + '</span></td>' + verifyCell +
+              '<td class="list__actions">' + (needsVerify
+                ? '<button type="button" class="button button--small button--primary" data-verify-user="' + escapeHtml(u.id) + '">Verify</button> ' : '') + (canDelete
                 ? '<button type="button" class="button button--small button--danger" data-delete-user="' + escapeHtml(u.id) + '">Delete</button>'
-                : '<span class="text-muted text-small">' + (u.id === me ? "You" : "Protected") + '</span>') + '</td></tr>';
+                : '<span class="text-muted text-small">' + (u.id === me ? "You" : (u.role === "admin" ? "See Administrators" : "Protected")) + '</span>') + '</td></tr>';
           }).join("") + '</tbody></table></div>';
+        list.querySelectorAll("[data-verify-user]").forEach(function (btn) {
+          btn.addEventListener("click", async function () {
+            const user = users.find(function (x) { return x.id === btn.getAttribute("data-verify-user"); });
+            if (!user) return;
+            btn.disabled = true;
+            Loader.show("Verifying…");
+            try {
+              await callRpc("tc_admin_verify_user", { p_user_id: user.id });
+              user.email_confirmed_at = new Date().toISOString();
+              Toast.success("Account verified", (user.full_name || user.email) + " can sign in now.");
+              draw();
+            } catch (err) { btn.disabled = false; Toast.error("Unable to verify", err.message); }
+            finally { Loader.hide(); }
+          });
+        });
         list.querySelectorAll("[data-delete-user]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             const user = users.find(function (x) { return x.id === btn.getAttribute("data-delete-user"); });
@@ -4959,6 +5209,274 @@
       draw();
     }
   });
+
+  /* ---------- Admin: create a passenger / driver / operator account that works at once ---------- */
+  function generatePassword() {
+    const letters = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ", digits = "23456789";
+    const pick = function (set) {
+      const buf = new Uint32Array(1);
+      (window.crypto || window.msCrypto).getRandomValues(buf);
+      return set.charAt(buf[0] % set.length);
+    };
+    let out = "";
+    for (let i = 0; i < 8; i++) out += pick(letters);
+    for (let i = 0; i < 3; i++) out += pick(digits);
+    return out;
+  }
+
+  async function createUserAsAdmin(f) {
+    // 1) Preferred: the admin-create-user Edge Function (instant, no email involved).
+    let edgeFailed = false;
+    try {
+      const res = await supabase.functions.invoke("admin-create-user", { body: f });
+      if (!res.error && res.data && res.data.ok) return res.data;
+      const data = res.data || (res.error && res.error.context && typeof res.error.context.json === "function"
+        ? await res.error.context.json().catch(function () { return null; }) : null);
+      if (data && data.error) throw new Error(data.error);
+      edgeFailed = true;
+    } catch (err) {
+      if (err && !/Failed to send|not found|404|FunctionsFetchError|FunctionsRelayError|fetch/i.test(String(err.message || err.name))) throw err;
+      edgeFailed = true;
+    }
+    // 2) Fallback (function not deployed yet): sign the person up on a throw-away client, then verify them.
+    if (!edgeFailed) throw new Error("Could not create the account.");
+    const temp = window.supabase.createClient(TRANSITCARE_CONFIG.SUPABASE_URL, TRANSITCARE_CONFIG.SUPABASE_ANON_KEY,
+      { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: "tc-admin-temp" } });
+    const su = await temp.auth.signUp({ email: f.email, password: f.password,
+      options: { data: { full_name: f.full_name, phone: f.phone || null, role: f.role } } });
+    if (su.error) throw su.error;
+    const user = su.data && su.data.user;
+    if (!user || !user.id || (user.identities && user.identities.length === 0)) throw new Error("An account with this email already exists.");
+    await callRpc("tc_admin_verify_user", { p_user_id: user.id });
+    const status = f.role === "driver" ? (f.approve ? "approved" : "email_verified") : "active";
+    const up = await supabase.from("profiles").update({ full_name: f.full_name, phone: f.phone || null, role: f.role, status: status }).eq("id", user.id);
+    if (up.error) throw up.error;
+    return { ok: true, id: user.id, email: f.email, role: f.role, status: status };
+  }
+
+  function openAddUserModal(onDone) {
+    Modal.open({
+      title: "Add user",
+      body:
+        '<p class="text-muted text-small">The account is ready to use straight away. No email verification is needed.</p>' +
+        '<div class="field"><label for="adduser-role">Account type</label><select id="adduser-role">' +
+          '<option value="passenger">Passenger</option><option value="driver">Driver</option><option value="operator">Operator</option></select></div>' +
+        '<div class="field"><label for="adduser-name">Full name</label><input type="text" id="adduser-name" autocomplete="off" /></div>' +
+        '<div class="field"><label for="adduser-email">Email</label><input type="email" id="adduser-email" autocomplete="off" /></div>' +
+        '<div class="field"><label for="adduser-phone">Phone (optional)</label><input type="tel" id="adduser-phone" autocomplete="off" /></div>' +
+        '<div class="field"><label for="adduser-password">Temporary password</label>' +
+          '<div class="input-row"><input type="text" id="adduser-password" autocomplete="off" />' +
+          '<button type="button" class="button button--ghost button--small" id="adduser-generate">Generate</button></div>' +
+          '<p class="text-muted text-small">At least 8 characters with letters and numbers. Share it with the person.</p></div>' +
+        '<label class="checkbox-row" id="adduser-approve-row" hidden><input type="checkbox" id="adduser-approve" checked /> Approve this driver now</label>',
+      footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="create">Create account</button>',
+      onAction: function (action) { return addUserAction(action); }
+    });
+    async function addUserAction(action) {
+        if (action === "cancel" || action === "done") { Modal.close(); if (action === "done" && onDone) onDone(); return; }
+        if (action === "copy") {
+          const txt = document.getElementById("adduser-result-text");
+          try { await navigator.clipboard.writeText(txt.textContent); Toast.success("Copied"); } catch (e) { Toast.info("Select the text and copy it"); }
+          return;
+        }
+        const f = {
+          role: document.getElementById("adduser-role").value,
+          full_name: document.getElementById("adduser-name").value.trim(),
+          email: document.getElementById("adduser-email").value.trim().toLowerCase(),
+          phone: document.getElementById("adduser-phone").value.trim(),
+          password: document.getElementById("adduser-password").value,
+          approve: document.getElementById("adduser-approve").checked
+        };
+        if (f.full_name.length < 2) { Toast.warning("Enter the full name"); return; }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) { Toast.warning("Enter a valid email"); return; }
+        if (f.password.length < 8 || !/[A-Za-z]/.test(f.password) || !/\d/.test(f.password)) {
+          Toast.warning("Weak password", "Use at least 8 characters with letters and numbers."); return;
+        }
+        Loader.show("Creating account…");
+        try {
+          const out = await createUserAsAdmin(f);
+          const body = document.getElementById("modal-body");
+          body.innerHTML =
+            '<p><strong>Account created.</strong> ' + escapeHtml(f.full_name) + ' can sign in now.</p>' +
+            '<pre id="adduser-result-text" class="code-block">Email: ' + escapeHtml(f.email) + '\nPassword: ' + escapeHtml(f.password) +
+              '\nRole: ' + escapeHtml(humanizeStatus(out.role || f.role)) + '</pre>' +
+            '<p class="text-muted text-small">This password is shown only once. Ask the person to change it after signing in.</p>';
+          const footer = document.getElementById("modal-footer");
+          footer.innerHTML = '<button type="button" class="button button--ghost" data-modal-action="copy">Copy details</button>' +
+            '<button type="button" class="button button--primary" data-modal-action="done">Done</button>';
+          footer.querySelectorAll("[data-modal-action]").forEach(function (b) {
+            b.addEventListener("click", function () { addUserAction(b.getAttribute("data-modal-action")); });
+          });
+        } catch (err) { Toast.error("Unable to create account", err.message); }
+        finally { Loader.hide(); }
+    }
+    const role = document.getElementById("adduser-role");
+    const row = document.getElementById("adduser-approve-row");
+    role.addEventListener("change", function () { row.hidden = role.value !== "driver"; });
+    document.getElementById("adduser-generate").addEventListener("click", function () {
+      document.getElementById("adduser-password").value = generatePassword();
+    });
+    document.getElementById("adduser-password").value = generatePassword();
+  }
+
+  /* =======================================================================
+     34b. ADMIN: MANAGE ADMINISTRATORS (add, view, edit, suspend, demote, delete)
+     ======================================================================= */
+  Router.register("admin-admins", {
+    title: "Administrators",
+    subtitle: "People who can manage the whole platform. You can add, edit, suspend, demote or delete administrators.",
+    headerActions: '<button type="button" class="button button--primary button--small" id="add-admin-button">+ Add admin</button>',
+    render: async function (container) {
+      container.innerHTML =
+        '<div class="alert alert--info"><span>To add an administrator, the person first creates a normal account and verifies it. ' +
+        'Then press <strong>+ Add admin</strong> and enter their email or phone number.</span></div>' +
+        '<div class="card"><div class="card__body card__body--flush" id="admins-list"></div></div>';
+      const list = document.getElementById("admins-list");
+      renderLoading(list, "Loading administrators…");
+
+      function reload() { Router.go("admin-admins"); }
+      const addBtn = document.getElementById("add-admin-button");
+      if (addBtn) addBtn.addEventListener("click", function () { openAddAdminModal(reload); });
+
+      const me = AppState.authUser ? AppState.authUser.id : null;
+      let admins = [];
+      try { admins = (await callRpc("tc_admin_list_admins")) || []; }
+      catch (err) { renderError(list, err.message); return; }
+
+      if (!admins.length) {
+        renderEmpty(list, { icon: "🛡️", title: "No administrators", message: "Add the first one with + Add admin." });
+        return;
+      }
+
+      list.innerHTML = '<div class="table-wrap"><table class="data-table">' +
+        '<thead><tr><th>Name</th><th>Email / phone</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead><tbody>' +
+        admins.map(function (a) {
+          const isSelf = a.id === me;
+          return '<tr><td>' + escapeHtml(a.full_name || "—") + (isSelf ? ' <span class="badge badge--active">You</span>' : "") + '</td>' +
+            '<td>' + escapeHtml(a.email || a.phone || "—") + '</td>' +
+            '<td><span class="badge badge--' + escapeHtml(a.status || "active") + '">' + escapeHtml(humanizeStatus(a.status || "active")) + '</span></td>' +
+            '<td>' + escapeHtml(a.last_sign_in_at ? formatDateTime(a.last_sign_in_at) : "Never") + '</td>' +
+            '<td class="list__actions">' +
+              '<button type="button" class="button button--small button--secondary" data-admin-edit="' + escapeHtml(a.id) + '">Edit</button>' +
+              (isSelf ? "" :
+                '<button type="button" class="button button--small button--ghost" data-admin-demote="' + escapeHtml(a.id) + '">Remove admin access</button>' +
+                '<button type="button" class="button button--small button--danger" data-admin-delete="' + escapeHtml(a.id) + '">Delete</button>') +
+            '</td></tr>';
+        }).join("") + '</tbody></table></div>';
+
+      function find(attr, btn) {
+        const id = btn.getAttribute(attr);
+        return admins.find(function (x) { return x.id === id; });
+      }
+      list.querySelectorAll("[data-admin-edit]").forEach(function (btn) {
+        btn.addEventListener("click", function () { const a = find("data-admin-edit", btn); if (a) openEditAdminModal(a, a.id === me, reload); });
+      });
+      list.querySelectorAll("[data-admin-demote]").forEach(function (btn) {
+        btn.addEventListener("click", function () { const a = find("data-admin-demote", btn); if (a) openDemoteAdminModal(a, reload); });
+      });
+      list.querySelectorAll("[data-admin-delete]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const a = find("data-admin-delete", btn);
+          if (a) openDeleteUserModal({ id: a.id, role: "admin", full_name: a.full_name, email: a.email, phone: a.phone }, reload, { rpc: "tc_admin_delete_admin" });
+        });
+      });
+    }
+  });
+
+  function openAddAdminModal(onDone) {
+    Modal.open({
+      title: "Add administrator",
+      body:
+        '<p class="text-muted mb-4">Enter the email address or phone number of an <strong>existing, verified</strong> account. ' +
+        'It becomes an administrator straight away. They should sign out and back in to see the admin menu.</p>' +
+        '<div class="field"><label for="admin-add-identifier">Email or phone number</label>' +
+        '<input type="text" id="admin-add-identifier" autocomplete="off" placeholder="name@example.com or 0803 000 0000" /></div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Make administrator</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const value = document.getElementById("admin-add-identifier").value.trim();
+        if (!value) { Toast.warning("Enter an email or phone number"); return; }
+        Loader.show("Adding administrator…");
+        try {
+          const res = await callRpc("tc_admin_promote", { p_identifier: value });
+          Modal.close();
+          Toast.success("Administrator added", ((res && (res.full_name || res.email)) || "The account") + " is now an administrator.");
+          if (typeof onDone === "function") onDone();
+        } catch (err) { Toast.error("Unable to add administrator", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  function openEditAdminModal(admin, isSelf, onDone) {
+    Modal.open({
+      title: "Edit administrator",
+      body:
+        '<div class="field"><label for="admin-edit-name">Full name</label>' +
+          '<input type="text" id="admin-edit-name" value="' + escapeHtml(admin.full_name || "") + '" /></div>' +
+        '<div class="field"><label for="admin-edit-phone">Phone number</label>' +
+          '<input type="tel" id="admin-edit-phone" value="' + escapeHtml(admin.phone || "") + '" /></div>' +
+        '<div class="field"><label for="admin-edit-status">Status</label>' +
+          '<select id="admin-edit-status"' + (isSelf ? " disabled" : "") + '>' +
+            '<option value="active"' + (admin.status !== "suspended" ? " selected" : "") + '>Active</option>' +
+            '<option value="suspended"' + (admin.status === "suspended" ? " selected" : "") + '>Suspended (cannot sign in)</option>' +
+          '</select>' +
+          (isSelf ? '<p class="field__hint">You cannot suspend your own account.</p>'
+                  : '<p class="field__hint">A suspended administrator is signed out and loses all access until reactivated.</p>') +
+        '</div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--primary" data-modal-action="save">Save changes</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        const name = document.getElementById("admin-edit-name").value.trim();
+        if (!name) { Toast.warning("Name required"); return; }
+        Loader.show("Saving…");
+        try {
+          await callRpc("tc_admin_update_admin", {
+            p_id: admin.id,
+            p_full_name: name,
+            p_phone: document.getElementById("admin-edit-phone").value.trim(),
+            p_status: document.getElementById("admin-edit-status").value
+          });
+          if (isSelf && AppState.profile) { AppState.profile.full_name = name; updateHeaderUser(); }
+          Modal.close();
+          Toast.success("Administrator updated");
+          if (typeof onDone === "function") onDone();
+        } catch (err) { Toast.error("Unable to save", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
+
+  function openDemoteAdminModal(admin, onDone) {
+    Modal.open({
+      title: "Remove administrator access",
+      body:
+        '<p class="text-muted mb-4"><strong>' + escapeHtml(admin.full_name || admin.email || "This person") + '</strong> keeps their account ' +
+        'but is no longer an administrator. Choose the role they should have instead.</p>' +
+        '<div class="field"><label for="admin-demote-role">New role</label>' +
+        '<select id="admin-demote-role"><option value="passenger">Passenger</option>' +
+        '<option value="driver">Driver (needs approval again)</option><option value="operator">Operator</option></select></div>',
+      footer:
+        '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
+        '<button type="button" class="button button--danger" data-modal-action="save">Remove admin access</button>',
+      onAction: async function (action) {
+        if (action === "cancel") { Modal.close(); return; }
+        Loader.show("Updating…");
+        try {
+          await callRpc("tc_admin_demote", { p_id: admin.id, p_role: document.getElementById("admin-demote-role").value });
+          Modal.close();
+          Toast.success("Administrator access removed");
+          if (typeof onDone === "function") onDone();
+        } catch (err) { Toast.error("Unable to update", err.message); }
+        finally { Loader.hide(); }
+      }
+    });
+  }
 
   // Admin: link operator logins to operator companies.
   Router.register("admin-operators", {
@@ -5440,14 +5958,16 @@
           }).join("") + '</select></div>' +
         '<div class="field"><label for="optrip-route">Route</label><select id="optrip-route">' +
           routes.map(function (r) { return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.origin + " → " + r.destination) + '</option>'; }).join("") + '</select></div>' +
-        '<div class="field"><label for="optrip-terminal">Terminal (optional)</label><select id="optrip-terminal"><option value="">— None —</option>' +
-          terminals.map(function (t) { return '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>'; }).join("") + '</select></div>' +
+        '<div class="field"><label for="optrip-terminal">Terminal</label><select id="optrip-terminal"><option value="">— None —</option></select>' +
+          '<p class="field__hint text-muted text-small" id="optrip-terminal-hint"></p></div>' +
         '<div class="field"><label for="optrip-departure">Departure</label><input type="datetime-local" id="optrip-departure" value="' + defaultDeparture + '" /></div>',
       footer: '<button type="button" class="button button--ghost" data-modal-action="cancel">Cancel</button>' +
         '<button type="button" class="button button--primary" data-modal-action="save">Schedule trip</button>',
       onAction: async function (action) {
         if (action === "cancel") { Modal.close(); return; }
         const dep = document.getElementById("optrip-departure").value;
+        const termSel = document.getElementById("optrip-terminal");
+        if (termSel && termSel.dataset.required === "1" && !termSel.value) { Toast.warning("Select a terminal", "Choose the terminal this trip leaves from."); return; }
         if (!dep) { Toast.warning("Choose a departure time"); return; }
         Loader.show("Scheduling…");
         try {
@@ -5463,6 +5983,14 @@
         } catch (err) { Toast.error("Unable to schedule trip", err.message); }
         finally { Loader.hide(); }
       }
+    });
+
+    const oRoute = document.getElementById("optrip-route"), oTerm = document.getElementById("optrip-terminal");
+    const oHint = document.getElementById("optrip-terminal-hint");
+    Data.getRouteTerminals().then(function (linkMap) {
+      function refresh() { fillTerminalSelect(oTerm, oHint, terminals, linkMap, oRoute.value, false); }
+      oRoute.addEventListener("change", refresh);
+      refresh();
     });
   }
 

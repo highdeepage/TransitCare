@@ -45,7 +45,7 @@ create unique index if not exists tickets_ticket_code_unique on public.tickets (
 create or replace function public.tc_is_admin()
 returns boolean language sql stable security definer
 set search_path = public, pg_temp as $$
-  select exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin');
+  select exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin' and coalesce(p.status, 'active') = 'active');
 $$;
 
 create or replace function public.tc_my_operator_id()

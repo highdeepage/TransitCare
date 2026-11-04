@@ -17,7 +17,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
-<link rel="stylesheet" href="style.css?v=7" />
+<link rel="stylesheet" href="style.css?v=8" />
 
 <!-- =========================================================
      INLINE STYLES
@@ -678,6 +678,10 @@
         <form id="otp-form" class="auth-form is-hidden" novalidate>
           <h2 class="auth-form__title">Verify your email</h2>
           <p class="auth-form__subtitle" id="otp-subtitle">Enter the 6-digit code we emailed you.</p>
+          <ol class="otp-steps" id="otp-steps">
+            <li>Open the email we just sent you (check spam too).</li>
+            <li>Type the <strong>6-digit code</strong> from that email below, <em>or</em> tap the <strong>Confirm my email</strong> button inside it.</li>
+          </ol>
 
           <div class="field">
             <label for="otp-code">6-digit code</label>
@@ -695,7 +699,10 @@
             <button type="button" class="link-button" id="otp-resend" disabled>Resend code</button>
             <button type="button" class="link-button" id="otp-change">Use a different email</button>
           </div>
-          <p class="field__hint mt-3">Can't see it? Check your spam folder. The code can only be used once.</p>
+          <div class="auth-form__row mt-3">
+            <button type="button" class="link-button" id="otp-signin">I already confirmed - sign in</button>
+          </div>
+          <p class="field__hint mt-3">Can't see the email (for example because of a poor network)? Ask an administrator to verify your account. Once they do, just sign in.</p>
         </form>
 
         <p class="auth-card__footer">
@@ -780,7 +787,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie.min.js"></script>
-<script src="script.js?v=7"></script>
+<script src="script.js?v=8"></script>
 
 </body>
 </html>
