@@ -4264,7 +4264,7 @@
     }
 
     // 2. Listen for future auth changes (login, logout, token refresh)
-    supabase.auth.onAuthStateChange(async function (event, session) {
+    supabase.auth.onAuthStateChange(function (event, session) {
       console.log("[TransitCare] Auth event:", event);
 
       if (event === "SIGNED_OUT") {
@@ -4272,7 +4272,15 @@
         showAuthScreen();
       } else if (event === "SIGNED_IN") {
         if (session && session.user) {
-          await handleSignedIn(session);
+          // Supabase re-sends SIGNED_IN every time you come back to the tab. If this person is
+          // already loaded, do nothing (no reload, no reset to the dashboard).
+          if (AppState.authUser && AppState.authUser.id === session.user.id && AppState.profile) {
+            AppState.authUser = session.user;
+            return;
+          }
+          // Never run Supabase calls inside this callback: the client holds an internal lock
+          // here, so awaiting a query would freeze every later request. Defer it.
+          setTimeout(function () { handleSignedIn(session); }, 0);
         }
       } else if (event === "PASSWORD_RECOVERY") {
         showAuthScreen();
